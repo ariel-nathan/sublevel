@@ -1,0 +1,550 @@
+import type {
+  Brush,
+  ButtonDef,
+  DoorDef,
+  LevelData,
+  LightDef,
+  PressurePlateDef,
+  PropKind,
+  PropSpawn,
+  SoundEmitterDef,
+} from "../core/api";
+import type { MaterialId } from "../core/materials";
+import { PROP_SPECS } from "../core/props";
+
+/**
+ * "Kestrel Annex": a lab, a service corridor with one bend, and a storage
+ * room with a pressure-plate puzzle that opens the exit alcove.
+ *
+ * Layout (top-down, +X right, +Z down the page, metres):
+ *
+ *   lab          x -4..4,     z -3..3,    ceiling 3.0   (spawn here)
+ *   door A       x 4..4.3,    z -0.7..0.7 (button on the lab wall)
+ *   corridor     x 4.3..10.8, z -1.25..1.25, then x 8.3..10.8, z 1.25..7.7
+ *   storage      x 5.5..13.5, z 8..16,    ceiling 4.0
+ *   door B       x 13.5..13.8, z 11.3..12.7 (held open by the plate)
+ *   exit alcove  x 13.8..15.8, z 11..13,  ceiling 3.0
+ */
+
+const WALL = 0.3;
+
+interface Opening {
+  a: number;
+  b: number;
+  top: number;
+}
+
+type Faces = Brush["faces"];
+
+const v = (x: number, y: number, z: number) => ({ x, y, z });
+
+export function defineLevel(): LevelData {
+  const brushes: Brush[] = [];
+  const props: PropSpawn[] = [];
+  const lights: LightDef[] = [];
+
+  /** Adds a brush from its min and max corners. */
+  const box = (
+    x0: number,
+    y0: number,
+    z0: number,
+    x1: number,
+    y1: number,
+    z1: number,
+    material: MaterialId,
+    faces?: Faces,
+  ): void => {
+    if (!(x0 < x1 && y0 < y1 && z0 < z1)) {
+      throw new Error(`degenerate brush ${[x0, y0, z0, x1, y1, z1].join(",")}`);
+    }
+    const brush: Brush = { min: v(x0, y0, z0), max: v(x1, y1, z1), material };
+    if (faces) brush.faces = faces;
+    brushes.push(brush);
+  };
+
+  /**
+   * A wall running along X (thin in Z), with doorways cut out. Openings start
+   * at the floor (y = 0); a sill fills the space below them.
+   */
+  const wallAlongX = (
+    xa: number,
+    xb: number,
+    z0: number,
+    z1: number,
+    yBot: number,
+    yTop: number,
+    material: MaterialId,
+    openings: Opening[] = [],
+    sill: MaterialId = material,
+  ): void => {
+    let cur = xa;
+    for (const o of [...openings].sort((p, q) => p.a - q.a)) {
+      if (o.a > cur) box(cur, yBot, z0, o.a, yTop, z1, material);
+      box(o.a, o.top, z0, o.b, yTop, z1, material);
+      box(o.a, yBot, z0, o.b, 0, z1, sill);
+      cur = o.b;
+    }
+    if (cur < xb) box(cur, yBot, z0, xb, yTop, z1, material);
+  };
+
+  /** A wall running along Z (thin in X), with doorways cut out. */
+  const wallAlongZ = (
+    x0: number,
+    x1: number,
+    za: number,
+    zb: number,
+    yBot: number,
+    yTop: number,
+    material: MaterialId,
+    openings: Opening[] = [],
+    sill: MaterialId = material,
+  ): void => {
+    let cur = za;
+    for (const o of [...openings].sort((p, q) => p.a - q.a)) {
+      if (o.a > cur) box(x0, yBot, cur, x1, yTop, o.a, material);
+      box(x0, o.top, o.a, x1, yTop, o.b, material);
+      box(x0, yBot, o.a, x1, 0, o.b, sill);
+      cur = o.b;
+    }
+    if (cur < zb) box(x0, yBot, cur, x1, yTop, zb, material);
+  };
+
+  /**
+   * Hazard-striped frame around a doorway in a wall facing +/-X. `face` is the
+   * X of the wall surface, `dir` the way the frame sticks out (+1 or -1).
+   */
+  const frameX = (
+    face: number,
+    dir: 1 | -1,
+    zc: number,
+    halfW: number,
+    height: number,
+  ): void => {
+    const xa = dir > 0 ? face : face - 0.1;
+    const xb = dir > 0 ? face + 0.1 : face;
+    box(xa, 0, zc - halfW - 0.2, xb, height, zc - halfW, "hazard_stripe");
+    box(xa, 0, zc + halfW, xb, height, zc + halfW + 0.2, "hazard_stripe");
+    box(
+      xa,
+      height,
+      zc - halfW - 0.2,
+      xb,
+      height + 0.2,
+      zc + halfW + 0.2,
+      "hazard_stripe",
+    );
+  };
+
+  /** Wall button on a wall facing +/-X. Returns the button face centre. */
+  const buttonX = (
+    face: number,
+    dir: 1 | -1,
+    y: number,
+    z: number,
+    material: MaterialId,
+  ): { x: number; y: number; z: number } => {
+    const backA = dir > 0 ? face : face - 0.06;
+    const backB = dir > 0 ? face + 0.06 : face;
+    box(backA, y - 0.2, z - 0.12, backB, y + 0.2, z + 0.12, "metal_panel");
+    const btnA = dir > 0 ? backB : backA - 0.03;
+    const btnB = dir > 0 ? backB + 0.03 : backA;
+    box(btnA, y - 0.08, z - 0.08, btnB, y + 0.08, z + 0.08, material);
+    return { x: dir > 0 ? btnB : btnA, y, z };
+  };
+
+  /** Recessed ceiling fixture: thin emissive slab just below the ceiling. */
+  const fixture = (
+    cx: number,
+    cz: number,
+    ceilY: number,
+    hx: number,
+    hz: number,
+    material: MaterialId = "light_panel",
+  ): void => {
+    box(cx - hx, ceilY - 0.06, cz - hz, cx + hx, ceilY, cz + hz, material);
+  };
+
+  const light = (
+    x: number,
+    y: number,
+    z: number,
+    color: [number, number, number],
+    radius: number,
+    intensity: number,
+    flicker: LightDef["flicker"] = "none",
+  ): void => {
+    lights.push({
+      position: v(x, y, z),
+      color: v(color[0], color[1], color[2]),
+      radius,
+      intensity,
+      flicker,
+    });
+  };
+
+  /** Prop resting with its bottom at `baseY`. */
+  const prop = (
+    kind: PropKind,
+    x: number,
+    baseY: number,
+    z: number,
+    yaw = 0,
+  ): void => {
+    props.push({
+      kind,
+      position: v(x, baseY + PROP_SPECS[kind].halfExtents.y, z),
+      yaw,
+    });
+  };
+
+  /** Bench or desk: cabinet body, plastic top overhanging towards `front`. */
+  const bench = (
+    x0: number,
+    x1: number,
+    z0: number,
+    z1: number,
+    front: "+z" | "-z",
+  ): void => {
+    box(x0, 0, z0, x1, 0.8, z1, "metal_panel");
+    if (front === "+z") {
+      box(x0, 0.8, z0, x1, 0.85, z1 + 0.05, "plastic_white");
+      box(x0, 0, z1, x1, 0.1, z1 + 0.03, "rubber_dark");
+    } else {
+      box(x0, 0.8, z0 - 0.05, x1, 0.85, z1, "plastic_white");
+      box(x0, 0, z0 - 0.03, x1, 0.1, z0, "rubber_dark");
+    }
+  };
+
+  /** Open steel shelving along Z against a wall at x0..x1. */
+  const shelfAlongZ = (
+    x0: number,
+    x1: number,
+    za: number,
+    zb: number,
+  ): void => {
+    box(x0, 0, za, x1, 2.0, za + 0.05, "metal_panel");
+    box(x0, 0, zb - 0.05, x1, 2.0, zb, "metal_panel");
+    for (const y of [0.1, 0.7, 1.3, 1.9]) {
+      box(x0, y, za, x1, y + 0.04, zb, "metal_panel");
+    }
+  };
+
+  /** Open steel shelving along X against a wall at z0..z1. */
+  const shelfAlongX = (
+    xa: number,
+    xb: number,
+    z0: number,
+    z1: number,
+  ): void => {
+    box(xa, 0, z0, xa + 0.05, 2.0, z1, "metal_panel");
+    box(xb - 0.05, 0, z0, xb, 2.0, z1, "metal_panel");
+    for (const y of [0.1, 0.7, 1.3, 1.9]) {
+      box(xa, y, z0, xb, y + 0.04, z1, "metal_panel");
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // Lab: x -4..4, z -3..3, ceiling 3.0
+  // -------------------------------------------------------------------------
+  box(-4, -WALL, -3, 4, 0, 3, "lab_floor_tile");
+  box(-4, 3, -3, 4, 3 + WALL, 3, "ceiling_panel");
+  wallAlongX(-4.3, 4.3, -3.3, -3, -WALL, 3.3, "lab_wall");
+  wallAlongX(-4.3, 4.3, 3, 3.3, -WALL, 3.3, "lab_wall");
+  wallAlongZ(-4.3, -4, -3, 3, -WALL, 3.3, "lab_wall");
+  wallAlongZ(
+    4,
+    4.3,
+    -3,
+    3,
+    -WALL,
+    3.3,
+    "lab_wall",
+    [{ a: -0.7, b: 0.7, top: 2.2 }],
+    "metal_panel",
+  );
+
+  // Rubber baseboards.
+  box(-4, 0, -3, 4, 0.1, -2.97, "rubber_dark");
+  box(-4, 0, 2.97, 4, 0.1, 3, "rubber_dark");
+  box(-4, 0, -3, -3.97, 0.1, 3, "rubber_dark");
+  box(3.97, 0, -3, 4, 0.1, -0.7, "rubber_dark");
+  box(3.97, 0, 0.7, 4, 0.1, 3, "rubber_dark");
+
+  // Door A frame on both sides and its two buttons.
+  frameX(4, -1, 0, 0.7, 2.2);
+  frameX(4.3, 1, 0, 0.7, 2.2);
+  const labButton = buttonX(4, -1, 1.2, 1.2, "button_red");
+  const corridorButton = buttonX(4.3, 1, 1.2, -1.08, "button_red");
+
+  // Lights: three recessed panels, steady cool white.
+  for (const cx of [-2.4, 0, 2.4]) {
+    fixture(cx, 0, 3, 0.6, 0.25);
+    light(cx, 2.6, 0, [0.85, 0.92, 1.0], 7.5, 1.2);
+  }
+  // Ceiling beams.
+  for (const x of [-1.2, 1.2])
+    box(x - 0.1, 2.85, -3, x + 0.1, 3, 3, "metal_panel");
+  box(-4, 2.85, -3, 4, 3, -2.8, "metal_panel");
+  box(-4, 2.85, 2.8, 4, 3, 3, "metal_panel");
+
+  // Benches along the north wall with a sign between them.
+  bench(-3.9, -0.6, -3, -2.3, "+z");
+  bench(0.6, 3.9, -3, -2.3, "+z");
+  box(-0.5, 1.4, -3, 0.5, 2.4, -2.96, "sign_warning");
+  // Wall shelves and instruments on the benches.
+  box(-3.9, 1.55, -3, -0.6, 1.59, -2.7, "metal_panel");
+  box(0.6, 1.55, -3, 3.9, 1.59, -2.7, "metal_panel");
+  box(-3.7, 1.59, -2.95, -3.3, 1.84, -2.75, "plastic_white");
+  box(-1.5, 1.59, -2.95, -1.0, 1.79, -2.75, "metal_panel");
+  box(1.0, 1.59, -2.95, 1.6, 1.89, -2.75, "plastic_white");
+  box(2.8, 1.59, -2.95, 3.4, 1.74, -2.75, "metal_panel");
+  box(-3.7, 0.85, -2.95, -3.3, 1.05, -2.6, "plastic_white");
+  box(-1.6, 0.85, -2.9, -1.2, 1.2, -2.6, "metal_panel");
+  box(0.8, 0.85, -2.9, 1.2, 1.1, -2.6, "plastic_white");
+  box(2.8, 0.85, -2.9, 3.3, 1.0, -2.6, "metal_panel");
+  // Desk on the west wall.
+  box(-4, 0, -1, -3.4, 0.8, -0.4, "metal_panel");
+  box(-4, 0, 0.72, -3.4, 0.8, 0.8, "metal_panel");
+  box(-4, 0.8, -1, -3.3, 0.85, 0.8, "plastic_white");
+  // Central table.
+  box(-1, 0.8, -0.5, 1, 0.85, 0.5, "plastic_white");
+  for (const sx of [-0.93, 0.85]) {
+    for (const sz of [-0.43, 0.35]) {
+      box(sx, 0, sz, sx + 0.08, 0.8, sz + 0.08, "metal_panel");
+    }
+  }
+  // Equipment cabinets on the south wall, each with a screen on its front.
+  for (const x0 of [0.4, 1.4]) {
+    box(x0, 0, 2.3, x0 + 0.8, 2.0, 3, "metal_panel");
+    box(x0 + 0.1, 1.0, 2.27, x0 + 0.6, 1.5, 2.3, "monitor_screen");
+    box(x0 + 0.1, 0.4, 2.27, x0 + 0.7, 0.9, 2.3, "rubber_dark");
+  }
+  // A tall rack in the south-west corner area.
+  box(-1.8, 0, 2.4, -1.0, 2.2, 3, "metal_panel");
+  box(-1.7, 1.2, 2.37, -1.2, 1.7, 2.4, "monitor_screen");
+
+  // Props.
+  prop("monitor", -2.5, 0.85, -2.65);
+  prop("monitor", 2.0, 0.85, -2.65);
+  prop("monitor", 0, 0.85, 0);
+  prop("chair", -2.9, 0, 0.2, Math.PI / 2);
+  prop("chair", 2.2, 0, -1.8);
+  prop("crate_wood_small", -3.4, 0, 2.4);
+  prop("crate_wood_small", 3.3, 0, 2.5);
+
+  // -------------------------------------------------------------------------
+  // Service corridor
+  // -------------------------------------------------------------------------
+  box(4.3, -WALL, -1.25, 8.3, 0, 1.25, "concrete_floor");
+  box(8.3, -WALL, -1.25, 10.8, 0, 2.5, "concrete_floor");
+  box(8.3, -WALL, 2.5, 10.8, 0, 5.5, "metal_grate");
+  box(8.3, -WALL, 5.5, 10.8, 0, 7.7, "concrete_floor");
+  box(4.3, 2.8, -1.25, 10.8, 3.1, 1.25, "concrete_wall");
+  box(8.3, 2.8, 1.25, 10.8, 3.1, 7.7, "concrete_wall");
+  wallAlongX(4, 11.1, -1.55, -1.25, -WALL, 3.1, "concrete_wall");
+  wallAlongZ(10.8, 11.1, -1.25, 8, -WALL, 3.1, "concrete_wall");
+  wallAlongX(4.3, 8.3, 1.25, 1.55, -WALL, 3.1, "concrete_wall");
+  wallAlongZ(8, 8.3, 1.25, 8, -WALL, 3.1, "concrete_wall");
+
+  // Hazard bands near door A.
+  box(4.4, 0.3, -1.25, 6.4, 0.6, -1.21, "hazard_stripe");
+  box(4.4, 0.3, 1.21, 6.4, 0.6, 1.25, "hazard_stripe");
+  // Pipes: along the north wall, round the bend and down the east wall.
+  box(4.4, 2.4, -1.25, 10.8, 2.55, -1.1, "pipe");
+  box(10.65, 2.4, -1.25, 10.8, 2.55, 7.7, "pipe");
+  box(4.4, 2.65, 0.7, 10.8, 2.8, 0.85, "pipe");
+  for (const x of [4.9, 6.4, 7.9, 9.4]) {
+    box(x - 0.04, 2.25, -1.25, x + 0.04, 2.4, -1.1, "metal_panel");
+  }
+  for (const z of [2.0, 3.5, 5.0, 6.5]) {
+    box(10.65, 2.25, z - 0.04, 10.8, 2.4, z + 0.04, "metal_panel");
+  }
+  // A second pipe down the west wall of the bend, a conduit on the south
+  // wall and a few wall vents.
+  box(8.3, 2.4, 1.25, 8.45, 2.55, 7.7, "pipe");
+  for (const z of [2.0, 3.5, 5.0, 6.5]) {
+    box(8.3, 2.25, z - 0.04, 8.45, 2.4, z + 0.04, "metal_panel");
+  }
+  box(4.5, 1.75, 1.13, 8.3, 1.85, 1.25, "pipe");
+  for (const x of [5.2, 6.8]) {
+    box(x - 0.04, 1.65, 1.13, x + 0.04, 1.75, 1.25, "metal_panel");
+  }
+  for (const x of [5.5, 7.0]) {
+    box(x, 1.0, 1.21, x + 0.6, 1.4, 1.25, "rubber_dark");
+  }
+  box(8.25, 1.0, 3, 8.3, 1.4, 3.6, "rubber_dark");
+  // Machine on the east wall with a feed pipe up to the run.
+  box(10.3, 0, 3.2, 10.8, 1.6, 4.4, "metal_panel");
+  box(10.3, 1.6, 3.2, 10.8, 1.65, 4.4, "rubber_dark");
+  box(10.45, 1.65, 3.65, 10.6, 2.4, 3.8, "pipe");
+  box(10.28, 0.9, 3.5, 10.3, 1.3, 4.1, "monitor_screen");
+  // Fixtures: steady, flickering, and a dead one.
+  fixture(5.9, 0, 2.8, 0.3, 0.1);
+  fixture(9.55, 0, 2.8, 0.3, 0.1);
+  fixture(9.55, 5, 2.8, 0.3, 0.1, "metal_panel");
+  light(5.9, 2.4, 0, [1.0, 0.78, 0.5], 6.5, 1.1);
+  light(9.55, 2.4, 0, [0.9, 0.95, 1.0], 6.5, 1.3, "fluorescent");
+  light(9.55, 2.4, 5, [1.0, 0.85, 0.6], 5.5, 1.0, "broken");
+
+  // Storage doorway frame on the corridor end.
+  box(8.1, 0, 8, 8.3, 2.8, 8.1, "hazard_stripe");
+  box(10.8, 0, 8, 11, 2.8, 8.1, "hazard_stripe");
+
+  // -------------------------------------------------------------------------
+  // Storage room: x 5.5..13.5, z 8..16, ceiling 4.0
+  // -------------------------------------------------------------------------
+  box(5.5, -WALL, 8, 13.5, 0, 16, "concrete_floor");
+  box(5.5, 4, 8, 13.5, 4.3, 16, "concrete_wall");
+  wallAlongX(
+    5.2,
+    13.8,
+    7.7,
+    8,
+    -WALL,
+    4.3,
+    "concrete_wall",
+    [{ a: 8.3, b: 10.8, top: 2.8 }],
+    "concrete_floor",
+  );
+  wallAlongX(5.2, 13.8, 16, 16.3, -WALL, 4.3, "metal_panel");
+  wallAlongZ(5.2, 5.5, 8, 16, -WALL, 4.3, "metal_panel");
+  wallAlongZ(
+    13.5,
+    13.8,
+    8,
+    16,
+    -WALL,
+    4.3,
+    "concrete_wall",
+    [{ a: 11.3, b: 12.7, top: 2.4 }],
+    "metal_panel",
+  );
+  // Ceiling beams and lamps.
+  for (const z of [9.6, 13, 15.6])
+    box(5.5, 3.7, z - 0.15, 13.5, 4, z + 0.15, "metal_panel");
+  fixture(9, 11, 4, 0.6, 0.25);
+  fixture(11, 14.5, 4, 0.6, 0.25);
+  light(9, 3.55, 11, [1.0, 0.88, 0.7], 9, 1.5);
+  light(11, 3.55, 14.5, [1.0, 0.88, 0.7], 9, 1.5);
+  // Pipes on the west wall, hazard band on the north wall, sign on the south.
+  box(5.5, 3.3, 8.2, 5.65, 3.45, 16, "pipe");
+  box(5.5, 0, 12.1, 5.65, 3.3, 12.25, "pipe");
+  box(5.5, 0, 12.4, 5.65, 3.3, 12.55, "pipe");
+  box(11.2, 2.4, 8, 13.5, 2.55, 8.1, "hazard_stripe");
+  box(9, 1.5, 15.96, 10, 2.5, 16, "sign_warning");
+  // Wall pilasters on the east wall.
+  box(13.2, 0, 14, 13.5, 4, 14.35, "metal_panel");
+  box(13.2, 0, 10.2, 13.5, 4, 10.5, "metal_panel");
+  // Shelving and pallets.
+  shelfAlongZ(5.5, 6.1, 8.5, 11);
+  shelfAlongX(11.2, 13.4, 8, 8.6);
+  box(5.6, 0.14, 8.6, 5.9, 0.44, 8.9, "crate_wood");
+  box(5.7, 0.74, 9.6, 6.0, 1.04, 9.95, "crate_metal");
+  box(5.6, 1.34, 10.2, 5.9, 1.64, 10.5, "crate_wood");
+  box(11.4, 0.74, 8.1, 11.8, 1.14, 8.5, "crate_wood");
+  box(12.6, 1.34, 8.1, 13.0, 1.74, 8.5, "crate_metal");
+  box(12.5, 0, 8.7, 13.4, 0.12, 9.7, "crate_wood");
+
+  // Mezzanine in the south-west corner, 1.4 m up. There are no raised floor
+  // markings anywhere, so pushed crates slide freely.
+  box(5.5, 0, 13.8, 8.5, 1.3, 16, "metal_panel");
+  box(5.5, 1.3, 13.8, 8.5, 1.4, 16, "metal_grate");
+  box(5.5, 0.3, 13.74, 8.5, 0.6, 13.8, "hazard_stripe");
+
+  // Door B frame (storage side) and doorway frame details.
+  frameX(13.5, -1, 12, 0.7, 2.4);
+  frameX(13.8, 1, 12, 0.7, 2.4);
+
+  // Exit alcove: x 13.8..15.8, z 11..13, ceiling 3.0.
+  box(13.8, -WALL, 11, 15.8, 0, 13, "lab_floor_tile");
+  box(13.8, 3, 11, 15.8, 3.3, 13, "metal_panel");
+  wallAlongX(13.8, 16.1, 10.7, 11, -WALL, 3.3, "metal_panel");
+  wallAlongX(13.8, 16.1, 13, 13.3, -WALL, 3.3, "metal_panel");
+  wallAlongZ(15.8, 16.1, 11, 13, -WALL, 3.3, "metal_panel");
+  box(15.76, 1, 11.5, 15.8, 2, 12.5, "monitor_screen");
+  box(14.5, 1, 11, 15.5, 2, 11.04, "sign_warning");
+  box(14.5, 1, 12.96, 15.5, 2, 13, "sign_warning");
+  fixture(14.8, 12, 3, 0.3, 0.3, "button_green");
+  light(14.8, 2.55, 12, [0.35, 1.0, 0.45], 4.5, 1.6);
+
+  // -------------------------------------------------------------------------
+  // Storage props
+  // -------------------------------------------------------------------------
+  // Mezzanine cargo.
+  prop("crate_wood", 6.0, 1.4, 15.0);
+  prop("crate_weak", 6.9, 1.4, 15.0);
+  prop("crate_wood", 7.8, 1.4, 15.0);
+  // The heavy crate, 3.8 m from the plate with a clear diagonal push path.
+  prop("crate_metal", 11.4, 0, 9.4);
+  // Wooden crate on a pallet with a small crate on top.
+  prop("crate_wood", 12.95, 0.12, 9.2);
+  prop("crate_wood_small", 12.95, 0.92, 9.2);
+  // Floor stock.
+  prop("crate_weak", 9.7, 0, 15.5);
+  prop("crate_wood", 11.0, 0, 15.5);
+  prop("crate_wood", 11.0, 0.8, 15.5);
+  prop("barrel", 12.5, 0, 15.4);
+  prop("barrel", 12.5, 0, 14.5);
+  prop("barrel", 13.1, 0, 14.95);
+  prop("crate_wood_small", 6.9, 0, 9.6);
+  prop("crate_wood_small", 12.2, 0, 13.4);
+
+  // -------------------------------------------------------------------------
+  // Doors, plate, buttons, sounds
+  // -------------------------------------------------------------------------
+  const doors: DoorDef[] = [
+    {
+      id: "door_a",
+      closed: { min: v(4, 0, -0.7), max: v(4.3, 2.2, 0.7) },
+      openOffset: v(0, 0, -1.4),
+      material: "door_steel",
+    },
+    {
+      id: "door_b",
+      closed: { min: v(13.5, 0, 11.3), max: v(13.8, 2.4, 12.7) },
+      openOffset: v(0, 0, -1.6),
+      material: "door_steel",
+    },
+  ];
+  const buttons: ButtonDef[] = [
+    {
+      id: "button_a_lab",
+      position: v(labButton.x, labButton.y, labButton.z),
+      facing: v(-1, 0, 0),
+      target: "door_a",
+    },
+    {
+      id: "button_a_corridor",
+      position: v(corridorButton.x, corridorButton.y, corridorButton.z),
+      facing: v(1, 0, 0),
+      target: "door_a",
+    },
+  ];
+  const plates: PressurePlateDef[] = [
+    {
+      id: "plate_b",
+      box: { min: v(7.9, 0, 11.4), max: v(9.1, 0.04, 12.6) },
+      requiredMass: 45,
+      target: "door_b",
+    },
+  ];
+  const emitters: SoundEmitterDef[] = [
+    { sound: "hum_fluorescent", position: v(9.55, 2.5, 0), gain: 0.5 },
+    { sound: "hum_machine", position: v(10.1, 1.2, 3.8), gain: 0.6 },
+    { sound: "ambient_drone", position: v(9.55, 1.5, 2), gain: 0.4 },
+  ];
+
+  return {
+    name: "Kestrel Annex",
+    brushes,
+    lights,
+    playerSpawn: { position: v(-2, 0, 1.6), yaw: -Math.PI / 2 },
+    props,
+    doors,
+    buttons,
+    plates,
+    emitters,
+    ambient: v(0.07, 0.075, 0.09),
+    fog: { color: v(0.07, 0.09, 0.11), near: 12, far: 40 },
+  };
+}

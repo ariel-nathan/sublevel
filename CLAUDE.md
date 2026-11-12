@@ -27,6 +27,8 @@ Each module owns one folder under `src/` and exports the factory named for it in
 - `src/math/`, `src/core/`, `src/main.ts`, `index.html` — shared skeleton. Do not edit from a module branch; if a contract needs to change, say so in your report instead.
 - `src/textures/`, `src/render/`, `src/physics/`, `src/level/`, `src/audio/`, `src/player/`, `src/props/`, `src/hud/` — one module each.
 - `demos/<module>.html` — optional standalone page for looking at or listening to a module by itself.
+- `tools/` — development-only Bun scripts, never imported by the game. `tools/png.ts` writes PNG files so a module can dump a preview image into `out/` (git-ignored) and look at it.
+- `src/core/props.ts` — prop sizes and masses (`PROP_SPECS`) and player dimensions (`PLAYER`).
 
 Modules import from `src/math` and `src/core` only, never from each other. The game wires them together in `src/main.ts`.
 

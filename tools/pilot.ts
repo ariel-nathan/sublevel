@@ -1,0 +1,525 @@
+/**
+ * The player's hands and eyes: deterministic, high-level actions on top of a
+ * `GameSession`, built only from `__harness.step(...)` with scripted input.
+ * Every action appends a line to `transcript` so a text-only reader can follow
+ * what happened.
+ *
+ *   const session = await launchGame();
+ *   const pilot = new Pilot(session, { run: "mytest" });
+ *   await pilot.walkTo(3.5, 1.2);
+ *   await pilot.pressButtonAt(3.91, 1.2, 1.2);
+ *   await pilot.frame("after-button");
+ *   console.log(pilot.transcript.join("\n"));
+ */
+import { join } from "node:path";
+import { PROP_SPECS } from "../src/core/props";
+import type { GameSession } from "./browser";
+import {
+  LOOK_SENSITIVITY,
+  RUN_STEP,
+  batchSteps,
+  clamp,
+  forwardInput,
+  horizontalDistance,
+  lookDelta,
+  lookError,
+  lookToward,
+  routeBetween,
+  standPoint,
+  type Look,
+  type Point2,
+  type Point3,
+} from "./pilot-math";
+
+// Carry geometry from src/player/tuning.ts (kept local: tools do not import
+// tuning because it is player-module internals).
+const HOLD_DISTANCE = 1.15;
+const HOLD_CLEARANCE = 0.55;
+const HOLD_LOWER = 0.15;
+const STAND_EYE_HEIGHT = 1.65;
+
+export interface BodyInfo {
+  id: number;
+  tag: string;
+  position: Point3;
+  asleep: boolean;
+}
+
+export interface PilotState {
+  step: number;
+  player: {
+    feet: Point3;
+    velocity: Point3;
+    yawDeg: number;
+    pitchDeg: number;
+    onGround: boolean;
+    crouched: boolean;
+    heldBody: number | null;
+    aim: { kind: string; id: number; distance: number } | null;
+  };
+  hud: { crosshair: string; prompt: string | null; message: string | null };
+  bodies: BodyInfo[];
+}
+
+export interface PilotEvent {
+  step: number;
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface PilotOptions {
+  /** Output folder name under `outDir`. */
+  run?: string;
+  /** Default "out". */
+  outDir?: string;
+  /** Print each transcript line as it happens. */
+  verbose?: boolean;
+}
+
+export interface WalkOptions {
+  /** Horizontal distance at which to stop. Default 0.3. */
+  tolerance?: number;
+  /** Give up after this many steps. Default 600. */
+  timeoutSteps?: number;
+  /** Hold jump while walking. */
+  jump?: boolean;
+  /** Hold crouch while walking. */
+  crouch?: boolean;
+  /** Skip the automatic detour through the level's corridor spine. */
+  direct?: boolean;
+}
+
+export interface WalkResult {
+  arrived: boolean;
+  x: number;
+  z: number;
+  distance: number;
+  steps: number;
+}
+
+const f = (n: number, digits = 2): string => n.toFixed(digits);
+const fmt = (p: Point3): string => `(${f(p.x)}, ${f(p.y)}, ${f(p.z)})`;
+
+export class Pilot {
+  readonly transcript: string[] = [];
+  readonly run: string;
+  readonly outDir: string;
+  private consumed = 0;
+  private readonly verbose: boolean;
+
+  constructor(
+    readonly session: GameSession,
+    options: PilotOptions = {},
+  ) {
+    this.run = options.run ?? "run";
+    this.outDir = join(options.outDir ?? "out", this.run);
+    this.verbose = options.verbose ?? false;
+  }
+
+  // --- Reading ---------------------------------------------------------------
+
+  state(): Promise<PilotState> {
+    return this.session.evaluate<PilotState>("__harness.state()");
+  }
+
+  /** Events since the given step (exclusive); all of them if omitted. */
+  events(sinceStep?: number): Promise<PilotEvent[]> {
+    return this.session.evaluate<PilotEvent[]>(
+      `__harness.events(${sinceStep ?? -1})`,
+    );
+  }
+
+  /** The camera position, including view bob. */
+  eye(): Promise<Point3> {
+    return this.session.evaluate<Point3>("__game.player.camera(1).position");
+  }
+
+  async bodies(tag?: string): Promise<BodyInfo[]> {
+    const { bodies } = await this.state();
+    return tag ? bodies.filter((body) => body.tag === tag) : bodies;
+  }
+
+  // --- Transcript ------------------------------------------------------------
+
+  /** Records one line: action, player position afterwards, new events. */
+  private async note(action: string, extra = ""): Promise<void> {
+    const state = await this.state();
+    const all = await this.events();
+    if (all.length < this.consumed) {
+      this.consumed = 0;
+    }
+    const fresh = all.slice(this.consumed);
+    this.consumed = all.length;
+    const footsteps = fresh.filter((e) => e.type === "footstep").length;
+    const interesting = fresh
+      .filter((e) => e.type !== "footstep")
+      .map((e) => `${e.type}@${e.step}`);
+    const parts = [
+      `[${String(state.step).padStart(5, "0")}]`,
+      action,
+      `-> ${fmt(state.player.feet)}`,
+      `yaw ${f(state.player.yawDeg, 1)} pitch ${f(state.player.pitchDeg, 1)}`,
+    ];
+    if (state.player.heldBody !== null) {
+      parts.push(`holding #${state.player.heldBody}`);
+    }
+    if (extra) {
+      parts.push(extra);
+    }
+    if (interesting.length > 0) {
+      parts.push(`events: ${interesting.join(" ")}`);
+    }
+    if (footsteps > 0) {
+      parts.push(`(${footsteps} footsteps)`);
+    }
+    const line = parts.join(" | ");
+    this.transcript.push(line);
+    if (this.verbose) {
+      console.log(line);
+    }
+  }
+
+  /** Adds a free-form line to the transcript. */
+  log(text: string): void {
+    this.transcript.push(`        # ${text}`);
+    if (this.verbose) {
+      console.log(`        # ${text}`);
+    }
+  }
+
+  // --- Stepping --------------------------------------------------------------
+
+  private raw(count: number, input: object = {}): Promise<void> {
+    return this.session.evaluate(
+      `__harness.step(${count}, ${JSON.stringify(input)})`,
+    );
+  }
+
+  /** Runs idle steps. */
+  async wait(steps: number): Promise<void> {
+    await this.raw(steps);
+    await this.note(`wait(${steps})`);
+  }
+
+  // --- Looking ---------------------------------------------------------------
+
+  /**
+   * Turns the view to an absolute yaw and pitch (degrees). Iterates until
+   * within 0.2 degrees. Costs a few simulation steps.
+   */
+  async look(yawDeg: number, pitchDeg: number, quiet = false): Promise<Look> {
+    const target = { yawDeg, pitchDeg };
+    let current = await this.currentLook();
+    for (let i = 0; i < 6 && lookError(current, target) > 0.05; i++) {
+      const { dx, dy } = lookDelta(current, target);
+      await this.raw(1, { lookDx: dx, lookDy: dy });
+      current = await this.currentLook();
+    }
+    if (!quiet) {
+      await this.note(
+        `look(${f(yawDeg, 1)}, ${f(pitchDeg, 1)})`,
+        lookError(current, target) > 0.2
+          ? `WARNING off by ${f(lookError(current, target), 2)} deg`
+          : "",
+      );
+    }
+    return current;
+  }
+
+  /** Turns the view toward a world point. */
+  async lookAt(x: number, y: number, z: number, quiet = false): Promise<Look> {
+    const target = lookToward(await this.eye(), { x, y, z });
+    const reached = await this.look(target.yawDeg, target.pitchDeg, true);
+    if (!quiet) {
+      await this.note(`lookAt(${f(x)}, ${f(y)}, ${f(z)})`);
+    }
+    return reached;
+  }
+
+  private async currentLook(): Promise<Look> {
+    const { player } = await this.state();
+    return { yawDeg: player.yawDeg, pitchDeg: player.pitchDeg };
+  }
+
+  // --- Moving ----------------------------------------------------------------
+
+  /**
+   * Faces the target and holds forward until within `tolerance`, re-aiming
+   * every few steps. Between rooms it follows the corridor spine through
+   * door A. Returns whether it arrived and where it ended.
+   */
+  async walkTo(
+    x: number,
+    z: number,
+    options: WalkOptions = {},
+  ): Promise<WalkResult> {
+    const start = (await this.state()).player.feet;
+    const stepsBefore = (await this.state()).step;
+    const via = options.direct ? [] : routeBetween(start, { x, z });
+    let result: WalkResult = {
+      arrived: true,
+      x: start.x,
+      z: start.z,
+      distance: 0,
+      steps: 0,
+    };
+    for (const [i, point] of [...via, { x, z }].entries()) {
+      const last = i === via.length;
+      result = await this.walkLeg(point.x, point.z, {
+        ...options,
+        tolerance: last ? (options.tolerance ?? 0.3) : 0.5,
+      });
+      if (!result.arrived) {
+        break;
+      }
+    }
+    const used = (await this.state()).step - stepsBefore;
+    await this.note(
+      `walkTo(${f(x)}, ${f(z)})`,
+      `${result.arrived ? "arrived" : "DID NOT ARRIVE"} dist ${f(result.distance)} in ${used} steps`,
+    );
+    return { ...result, steps: used };
+  }
+
+  private async walkLeg(
+    x: number,
+    z: number,
+    options: WalkOptions,
+  ): Promise<WalkResult> {
+    const tolerance = options.tolerance ?? 0.3;
+    const timeout = options.timeoutSteps ?? 600;
+    const startStep = (await this.state()).step;
+    let stalled = 0;
+    let bestDistance = Infinity;
+    for (;;) {
+      const state = await this.state();
+      const feet = state.player.feet;
+      const distance = horizontalDistance(feet, { x, z });
+      const used = state.step - startStep;
+      if (distance <= tolerance) {
+        await this.raw(8); // let the run-out velocity die
+        return this.legResult(x, z, tolerance, used);
+      }
+      if (used >= timeout || stalled >= 5) {
+        return this.legResult(x, z, tolerance, used);
+      }
+      if (distance < bestDistance - 0.02) {
+        bestDistance = distance;
+        stalled = 0;
+      } else {
+        stalled++;
+      }
+      const eye = await this.eye();
+      const wanted = lookToward(eye, { x, y: eye.y, z });
+      const here = {
+        yawDeg: state.player.yawDeg,
+        pitchDeg: state.player.pitchDeg,
+      };
+      const turn = lookDelta(here, {
+        yawDeg: wanted.yawDeg,
+        pitchDeg: here.pitchDeg,
+      });
+      const yawOff = Math.abs((turn.dx * LOOK_SENSITIVITY * 180) / Math.PI);
+      if (yawOff > 3) {
+        await this.raw(1, { lookDx: turn.dx });
+        continue;
+      }
+      await this.raw(batchSteps(distance, tolerance), {
+        moveZ: forwardInput(distance),
+        lookDx: turn.dx,
+        jump: options.jump === true,
+        crouch: options.crouch === true,
+      });
+    }
+  }
+
+  private async legResult(
+    x: number,
+    z: number,
+    tolerance: number,
+    steps: number,
+  ): Promise<WalkResult> {
+    const feet = (await this.state()).player.feet;
+    const distance = horizontalDistance(feet, { x, z });
+    return {
+      arrived: distance <= tolerance + RUN_STEP,
+      x: feet.x,
+      z: feet.z,
+      distance,
+      steps,
+    };
+  }
+
+  /** Presses the jump key for one step, then waits to land (up to 120 steps). */
+  async jump(settle = true): Promise<void> {
+    await this.raw(1, { jump: true });
+    if (settle) {
+      for (let i = 0; i < 24; i++) {
+        await this.raw(5);
+        if ((await this.state()).player.onGround) {
+          break;
+        }
+      }
+    }
+    await this.note("jump()");
+  }
+
+  /** Holds crouch for `steps` steps (then stays crouched if you keep calling). */
+  async crouch(steps: number): Promise<void> {
+    await this.raw(steps, { crouch: true });
+    await this.note(`crouch(${steps})`);
+  }
+
+  // --- Interacting -----------------------------------------------------------
+
+  /** Presses the use key for one step. */
+  async use(): Promise<void> {
+    await this.raw(1, { usePressed: true });
+    await this.raw(2);
+    await this.note("use()");
+  }
+
+  /** Presses the primary key (throw / shove) for one step. */
+  async primary(): Promise<void> {
+    await this.raw(1, { primaryPressed: true });
+    await this.note("primary()");
+  }
+
+  /**
+   * Walks within reach of the body, looks at its centre and presses use.
+   * Returns true if the body is now held.
+   */
+  async pickUp(bodyId: number): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const state = await this.state();
+      const body = state.bodies.find((b) => b.id === bodyId);
+      if (!body) {
+        this.log(`pickUp(#${bodyId}): no such body`);
+        return false;
+      }
+      const feet = state.player.feet;
+      if (horizontalDistance(feet, body.position) > 1.7) {
+        const spot = standPoint(body.position, feet, 1.3);
+        await this.walkTo(spot.x, spot.z, { tolerance: 0.25 });
+      }
+      await this.lookAt(
+        body.position.x,
+        body.position.y,
+        body.position.z,
+        true,
+      );
+      await this.raw(1, { usePressed: true });
+      await this.raw(3);
+      const held = (await this.state()).player.heldBody;
+      if (held === bodyId) {
+        await this.note(`pickUp(#${bodyId} ${body.tag})`, "held");
+        return true;
+      }
+    }
+    await this.note(`pickUp(#${bodyId})`, "FAILED to pick up");
+    return false;
+  }
+
+  /**
+   * Carries the held body over a point and lets go so that it comes to rest
+   * with its centre at height `y` above (x, z). The carried body hovers
+   * about 1.2 m ahead of the eye (see src/player/tuning.ts), so the pilot
+   * stands that far from the point, tilts the view so the body hangs a
+   * quarter metre above its resting height, waits for it to settle, then
+   * presses use. `from` says which side to stand on (a point in that
+   * direction; default: where the pilot is now), which matters when the pilot
+   * must not stand on a plate or push other props. Returns true if dropped.
+   */
+  async dropAt(
+    x: number,
+    y: number,
+    z: number,
+    from?: Point2,
+  ): Promise<boolean> {
+    const start = await this.state();
+    const held = start.player.heldBody;
+    if (held === null) {
+      this.log("dropAt: nothing held");
+      return false;
+    }
+    const tag = start.bodies.find((b) => b.id === held)?.tag ?? "";
+    const spec = PROP_SPECS[tag as keyof typeof PROP_SPECS];
+    const radius = spec
+      ? Math.hypot(spec.halfExtents.x, spec.halfExtents.y, spec.halfExtents.z)
+      : 0.5;
+    const distance = Math.max(HOLD_DISTANCE, radius + HOLD_CLEARANCE);
+    const eyeY = STAND_EYE_HEIGHT;
+    const sinPitch = (y + 0.25 + HOLD_LOWER - eyeY) / distance;
+    const pitchDeg = clamp(
+      (Math.asin(clamp(sinPitch, -1, 1)) * 180) / Math.PI,
+      -60,
+      20,
+    );
+    const flat = distance * Math.cos((pitchDeg * Math.PI) / 180);
+    const side = from ?? start.player.feet;
+    const spot = standPoint({ x, z }, side, flat);
+    // Carry height follows the view pitch: set it before walking so the body
+    // does not sweep through other props on the way.
+    await this.look(start.player.yawDeg, pitchDeg, true);
+    await this.walkTo(spot.x, spot.z, { tolerance: 0.15 });
+    const eye = await this.eye();
+    const yaw = lookToward(eye, { x, y: eye.y, z }).yawDeg;
+    await this.look(yaw, pitchDeg, true);
+    await this.raw(20); // let the carried body settle into its hold point
+    const body = (await this.bodies()).find((b) => b.id === held);
+    await this.raw(1, { usePressed: true });
+    await this.raw(30); // let it fall and rest
+    const after = (await this.state()).player.heldBody;
+    await this.note(
+      `dropAt(${f(x)}, ${f(y)}, ${f(z)})`,
+      `released at ${body ? fmt(body.position) : "?"}${after === null ? "" : " STILL HELD"}`,
+    );
+    return after === null;
+  }
+
+  /**
+   * Walks within reach of a wall button, looks at it, presses use and checks
+   * for a `button_press` event. `from` says which side of the wall to stand
+   * on (default: wherever the pilot is now).
+   */
+  async pressButtonAt(
+    x: number,
+    y: number,
+    z: number,
+    from?: Point2,
+  ): Promise<boolean> {
+    const start = (await this.state()).player.feet;
+    const side = from ?? start;
+    const spot = standPoint({ x, z }, side, 1.2);
+    await this.walkTo(spot.x, spot.z, { tolerance: 0.3 });
+    await this.lookAt(x, y, z, true);
+    const before = (await this.state()).step;
+    await this.raw(1, { usePressed: true });
+    await this.raw(3);
+    const events = await this.events(before - 1);
+    const pressed = events.some((e) => e.type === "button_press");
+    await this.note(
+      `pressButtonAt(${f(x)}, ${f(y)}, ${f(z)})`,
+      pressed ? "pressed" : "NO button_press event",
+    );
+    return pressed;
+  }
+
+  // --- Seeing ----------------------------------------------------------------
+
+  /** Saves the exact rendered frame as `<outDir>/<name>.png`. */
+  async frame(name: string): Promise<string> {
+    const path = join(this.outDir, `${name}.png`);
+    await this.session.captureFrame(path);
+    this.log(`frame ${path}`);
+    return path;
+  }
+
+  /** Saves a screenshot of the whole page, HUD included. */
+  async page(name: string): Promise<string> {
+    const path = join(this.outDir, `${name}-page.png`);
+    await this.session.screenshot(path);
+    this.log(`page ${path}`);
+    return path;
+  }
+}

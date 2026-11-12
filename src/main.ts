@@ -1,14 +1,26 @@
-import type { DrawItem, LightDef, PointLight } from "./core/api";
+import { createAudioSystem } from "./audio";
+import type {
+  ColliderRef,
+  DrawItem,
+  LightDef,
+  PlayerEvent,
+  PlayerInput,
+  PointLight,
+  SoundId,
+} from "./core/api";
 import { createInput } from "./core/input";
 import { runLoop } from "./core/loop";
+import { MATERIALS, type SurfaceKind } from "./core/materials";
+import { createHud } from "./hud";
 import { buildLevel } from "./level";
-import { clamp, mat4, quat, v3, type Vec3 } from "./math";
+import { mat4, quat, v3, type Vec3 } from "./math";
+import { createPhysicsWorld } from "./physics";
+import { createPlayer } from "./player";
 import { createRenderer } from "./render";
 import { createTextureSet } from "./textures";
 
 const SEED = 1998;
 const INTERNAL_HEIGHT = 300;
-const FOV_Y = (74 * Math.PI) / 180;
 
 const status = document.getElementById("status") as HTMLDivElement;
 
@@ -47,6 +59,26 @@ function debugCamera(): {
   };
 }
 
+const FOOTSTEPS: Readonly<Record<SurfaceKind, SoundId>> = {
+  concrete: "footstep_concrete",
+  tile: "footstep_tile",
+  metal: "footstep_metal",
+  wood: "footstep_concrete",
+  plastic: "footstep_tile",
+  rubber: "footstep_concrete",
+};
+
+const IDLE_INPUT: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  lookDx: 0,
+  lookDy: 0,
+  jump: false,
+  crouch: false,
+  usePressed: false,
+  primaryPressed: false,
+};
+
 async function start(): Promise<void> {
   const canvas = document.getElementById("view") as HTMLCanvasElement;
   const textures = createTextureSet(SEED);
@@ -67,41 +99,128 @@ async function start(): Promise<void> {
     transform: identity,
   }));
 
-  // Temporary free-fly camera until the player module lands.
-  const fixed = debugCamera();
-  const spawn = level.data.playerSpawn;
-  let position =
-    fixed?.position ?? v3.add(spawn.position, v3.create(0, 1.65, 0));
-  let yaw = fixed?.yaw ?? spawn.yaw;
-  let pitch = fixed?.pitch ?? 0;
-  const input = createInput(canvas);
-  let time = 0;
+  const physics = createPhysicsWorld();
+  /** Surface kind of each static collider, for footsteps. */
+  const staticSurfaces = new Map<number, SurfaceKind>();
+  level.colliders.forEach((box, index) => {
+    const brush = level.data.brushes[index];
+    const top = brush?.faces?.py ?? brush?.material ?? "concrete_floor";
+    staticSurfaces.set(physics.addStatic(box), MATERIALS[top].surface);
+  });
+  const surfaceOf = (ref: ColliderRef | null): SurfaceKind => {
+    if (ref?.kind === "static") {
+      return staticSurfaces.get(ref.id) ?? "concrete";
+    }
+    if (ref?.kind === "body") {
+      const tag = physics.getBody(ref.id)?.tag ?? "";
+      return tag.includes("metal") || tag === "barrel" ? "metal" : "wood";
+    }
+    return "metal";
+  };
 
+  const player = createPlayer({ physics, spawn: level.data.playerSpawn });
+  const hud = createHud(document.body);
+  const audio = createAudioSystem();
+  for (const emitter of level.data.emitters) {
+    audio.startLoop(emitter.sound, {
+      position:
+        emitter.sound === "ambient_drone" ? undefined : emitter.position,
+      gain: emitter.gain,
+    });
+  }
+  const input = createInput(canvas, () => {
+    void audio.resume();
+  });
+
+  const fixedCamera = debugCamera();
+  /** Scripted input for automated checks: window.__sublevel.input = {...} */
+  const debug: { input: Partial<PlayerInput> | null } = { input: null };
+  Object.assign(window, { __sublevel: { debug, player, physics, level } });
+
+  const samplePlayerInput = (): PlayerInput => {
+    if (debug.input) {
+      const scripted = { ...IDLE_INPUT, ...debug.input };
+      // Edge-triggered fields fire once.
+      debug.input.usePressed = false;
+      debug.input.primaryPressed = false;
+      debug.input.lookDx = 0;
+      debug.input.lookDy = 0;
+      return scripted;
+    }
+    const look = input.consumeLook();
+    const use = input.consumePressed("KeyE");
+    const primary = input.consumePressed("Mouse0");
+    if (!input.locked) {
+      return IDLE_INPUT;
+    }
+    const axis = (positive: string, negative: string): number =>
+      (input.isDown(positive) ? 1 : 0) - (input.isDown(negative) ? 1 : 0);
+    return {
+      moveX: axis("KeyD", "KeyA"),
+      moveZ: axis("KeyW", "KeyS"),
+      lookDx: look.dx,
+      lookDy: look.dy,
+      jump: input.isDown("Space"),
+      // Ctrl+W closes the tab in most browsers, so C and Shift crouch too.
+      crouch:
+        input.isDown("ControlLeft") ||
+        input.isDown("KeyC") ||
+        input.isDown("ShiftLeft"),
+      usePressed: use,
+      primaryPressed: primary,
+    };
+  };
+
+  const onPlayerEvent = (event: PlayerEvent): void => {
+    switch (event.type) {
+      case "footstep":
+        audio.play(FOOTSTEPS[surfaceOf(event.on)], {
+          gain: 0.5,
+          pitch: 0.92 + Math.random() * 0.16,
+        });
+        break;
+      case "jump":
+        audio.play("jump");
+        break;
+      case "land":
+        audio.play("land", { gain: Math.min(1, event.speed / 8) });
+        break;
+      case "pickup":
+        audio.play("pickup");
+        break;
+      case "throw":
+        audio.play("throw");
+        break;
+      case "drop":
+      case "use":
+        break;
+    }
+  };
+
+  let time = 0;
   runLoop({
     update(dt) {
       time += dt;
-      const look = input.consumeLook();
-      yaw -= look.dx * 0.0022;
-      pitch = clamp(pitch - look.dy * 0.0022, -1.5, 1.5);
-      const orientation = quat.fromYawPitch(yaw, pitch);
-      const forward = quat.rotate(orientation, v3.create(0, 0, -1));
-      const right = quat.rotate(orientation, v3.create(1, 0, 0));
-      const speed = input.isDown("ShiftLeft") ? 9 : 4;
-      const axis = (positive: string, negative: string): number =>
-        (input.isDown(positive) ? 1 : 0) - (input.isDown(negative) ? 1 : 0);
-      position = v3.addScaled(
-        position,
-        forward,
-        axis("KeyW", "KeyS") * speed * dt,
-      );
-      position = v3.addScaled(
-        position,
-        right,
-        axis("KeyD", "KeyA") * speed * dt,
-      );
-      position.y += axis("Space", "ControlLeft") * speed * dt;
+      for (const event of player.update(dt, samplePlayerInput())) {
+        onPlayerEvent(event);
+      }
+      physics.step(dt);
+      physics.drainContacts();
     },
-    render() {
+    render(alpha) {
+      const camera = player.camera(alpha);
+      if (fixedCamera) {
+        camera.position = fixedCamera.position;
+        camera.orientation = quat.fromYawPitch(
+          fixedCamera.yaw,
+          fixedCamera.pitch,
+        );
+      }
+      audio.setListener(
+        camera.position,
+        quat.rotate(camera.orientation, v3.create(0, 0, -1)),
+        quat.rotate(camera.orientation, v3.create(0, 1, 0)),
+      );
       const lights: PointLight[] = level.data.lights.map((light, index) => ({
         position: light.position,
         color: light.color,
@@ -110,23 +229,23 @@ async function start(): Promise<void> {
         baked: light.flicker === "none",
       }));
       renderer.render({
-        camera: {
-          position,
-          orientation: quat.fromYawPitch(yaw, pitch),
-          fovY: FOV_Y,
-          near: 0.05,
-          far: 80,
-        },
+        camera,
         items: levelItems,
         lights,
         ambient: level.data.ambient,
         fog: level.data.fog,
         time,
       });
+      hud.update({
+        playing: input.locked || debug.input !== null,
+        crosshair: player.heldBody !== null ? "holding" : "idle",
+        prompt: null,
+        message: null,
+      });
     },
   });
 
-  status.textContent = `${level.data.name}  ${renderer.width}x${renderer.height}  click to fly: WASD, mouse, Space/Ctrl`;
+  status.textContent = "";
   console.log("sublevel: running", level.data.name);
 }
 

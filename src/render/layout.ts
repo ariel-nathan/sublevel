@@ -4,8 +4,86 @@
  * covered by layout.test.ts; the layouts must match scene.wgsl / post.wgsl.
  */
 import type { Mat4, Vec3 } from "../math";
-import type { Camera, Color, Fog, PointLight } from "../core/api";
+import type { Camera, Color, DebugView, Fog, PointLight } from "../core/api";
+import { MATERIAL_IDS } from "../core/materials";
 import type { MeshData } from "../core/mesh";
+
+// ---------------------------------------------------------------------------
+// Debug views
+// ---------------------------------------------------------------------------
+
+/**
+ * Numeric id of each debug view, as used by scene.wgsl (frame.counts.y) and
+ * post.wgsl (params.z). Keep in sync with the constants at the top of both.
+ */
+export const DEBUG_VIEW_IDS: Readonly<Record<DebugView, number>> = {
+  none: 0,
+  coverage: 1,
+  material: 2,
+  depth: 3,
+  normals: 4,
+  lighting: 5,
+};
+
+/** Distance in metres at which the "depth" view reaches black. */
+export const DEBUG_DEPTH_RANGE = 40;
+
+/**
+ * Views whose scene output is the final colour: the present pass copies it
+ * without sRGB encoding, dithering or quantisation.
+ */
+export function isRawDebugView(view: DebugView): boolean {
+  return (
+    view === "coverage" ||
+    view === "material" ||
+    view === "depth" ||
+    view === "normals"
+  );
+}
+
+/** Scene clear colour: magenta for coverage/material, black for depth/normals. */
+export function debugClearColor(view: DebugView, fog: Color): Color {
+  if (view === "coverage" || view === "material") {
+    return { x: 1, y: 0, z: 1 };
+  }
+  if (view === "depth" || view === "normals") {
+    return { x: 0, y: 0, z: 0 };
+  }
+  return fog;
+}
+
+/** Room for this many materials in the frame uniforms' debug palette. */
+export const MAX_PALETTE = 32;
+
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const f = (n: number): number => {
+    const k = (n + h * 6) % 6;
+    return v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
+  };
+  return [f(5), f(3), f(1)];
+}
+
+/**
+ * Flat colour (bytes 0..255) of the material with the given index in
+ * MATERIAL_IDS. Hues step by the golden angle, skipping the magenta band
+ * (reserved for "nothing drawn"), and saturation/value alternate so
+ * neighbouring ids differ strongly. Never white, black or magenta.
+ */
+export function materialDebugColor(index: number): [number, number, number] {
+  // 23 is prime, so stepping by 10 slots visits every hue slot once and
+  // neighbouring ids land about 140 degrees apart.
+  const slot = (index * 10) % 23;
+  // Squeeze the hue circle into 330 degrees and open a 30 degree gap at magenta.
+  let degrees = (slot / 23) * 330;
+  if (degrees >= 285) {
+    degrees += 30;
+  }
+  const level = index % 3;
+  const saturation = [1, 0.6, 1][level];
+  const value = [1, 0.75, 0.6][level];
+  const [r, g, b] = hsvToRgb(degrees / 360, saturation, value);
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
 
 // ---------------------------------------------------------------------------
 // Retro finish
@@ -178,6 +256,7 @@ export function writeNormalMatrix(
 // ---------------------------------------------------------------------------
 // Per-item data (storage buffer, one Item per draw, indexed by instance_index)
 //   model: mat4x4f, normal: 3 x vec4f, tint: vec4f, flags: vec4f
+//   flags = (baked colours, emissive, material index, 0)
 // ---------------------------------------------------------------------------
 
 export const ITEM_FLOATS = 36;
@@ -190,6 +269,7 @@ export function packItem(
   tint: Color | undefined,
   hasColors: boolean,
   emissive: boolean,
+  materialIndex = 0,
 ): void {
   const o = index * ITEM_FLOATS;
   out.set(model.subarray(0, 16), o);
@@ -200,7 +280,7 @@ export function packItem(
   out[o + 31] = 1;
   out[o + 32] = hasColors ? 1 : 0;
   out[o + 33] = emissive ? 1 : 0;
-  out[o + 34] = 0;
+  out[o + 34] = materialIndex;
   out[o + 35] = 0;
 }
 
@@ -261,14 +341,17 @@ export function selectLights(
 //   20 ambient    vec4f  (rgb)
 //   24 fogColor   vec4f  (rgb, w = fog near)
 //   28 fogParams  vec4f  (x = fog far, y = time)
-//   32 counts     vec4u  (x = light count)
+//   32 counts     vec4u  (x = light count, y = debug view id)
 //   36 lights     array<Light, MAX_LIGHTS>, Light = posRadius vec4f,
 //                 colorBaked vec4f (rgb = color * intensity, w = baked)
+//   then palette  array<vec4f, MAX_PALETTE> (rgb = material debug colour 0..1)
 // ---------------------------------------------------------------------------
 
 export const FRAME_LIGHTS_OFFSET = 36;
 export const LIGHT_FLOATS = 8;
-export const FRAME_FLOATS = FRAME_LIGHTS_OFFSET + MAX_LIGHTS * LIGHT_FLOATS;
+export const FRAME_PALETTE_OFFSET =
+  FRAME_LIGHTS_OFFSET + MAX_LIGHTS * LIGHT_FLOATS;
+export const FRAME_FLOATS = FRAME_PALETTE_OFFSET + MAX_PALETTE * 4;
 export const FRAME_BYTES = FRAME_FLOATS * 4;
 
 export interface FrameUniformInput {
@@ -278,6 +361,8 @@ export interface FrameUniformInput {
   fog: Fog;
   time: number;
   lights: readonly PointLight[];
+  /** Defaults to "none". */
+  debugView?: DebugView;
 }
 
 /** Writes the frame uniforms into `out` (FRAME_FLOATS long). */
@@ -301,7 +386,9 @@ export function packFrameUniforms(
   out[28] = Math.max(input.fog.far, input.fog.near + 1e-3);
   out[29] = input.time;
   const count = Math.min(input.lights.length, MAX_LIGHTS);
-  new Uint32Array(out.buffer, out.byteOffset + 32 * 4, 4)[0] = count;
+  const counts = new Uint32Array(out.buffer, out.byteOffset + 32 * 4, 4);
+  counts[0] = count;
+  counts[1] = DEBUG_VIEW_IDS[input.debugView ?? "none"];
   for (let i = 0; i < count; i++) {
     const light = input.lights[i];
     const o = FRAME_LIGHTS_OFFSET + i * LIGHT_FLOATS;
@@ -314,18 +401,34 @@ export function packFrameUniforms(
     out[o + 6] = light.color.z * light.intensity;
     out[o + 7] = light.baked ? 1 : 0;
   }
+  for (let i = 0; i < MATERIAL_IDS.length && i < MAX_PALETTE; i++) {
+    const [r, g, b] = materialDebugColor(i);
+    const o = FRAME_PALETTE_OFFSET + i * 4;
+    out[o] = r / 255;
+    out[o + 1] = g / 255;
+    out[o + 2] = b / 255;
+    out[o + 3] = 1;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Post uniforms (must match `Post` in post.wgsl): x = levels, y = dither
+// Post uniforms (must match `Post` in post.wgsl):
+//   x = levels, y = dither, z = 1 to copy the scene colour through untouched
+//   (raw debug views)
 // ---------------------------------------------------------------------------
 
 export function packPostUniforms(
   colorBits: number,
   dither: boolean,
+  debugView: DebugView = "none",
 ): Float32Array {
   const bits = Math.min(8, Math.max(1, Math.round(colorBits)));
-  return new Float32Array([(1 << bits) - 1, dither && bits < 8 ? 1 : 0, 0, 0]);
+  return new Float32Array([
+    (1 << bits) - 1,
+    dither && bits < 8 ? 1 : 0,
+    isRawDebugView(debugView) ? 1 : 0,
+    0,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -356,9 +459,13 @@ export interface MipLevel {
 
 /**
  * Full mip chain for a square power-of-two RGBA8 sRGB image, down to 1x1.
- * Each level is a 2x2 box filter of the previous one, averaged in linear
- * light (alpha averaged linearly) and re-encoded as sRGB. Level 0 is the
- * input itself.
+ * Each level is a 2x2 box filter of the previous one. Alpha is averaged
+ * linearly; colour is averaged in linear light weighted by alpha (a
+ * premultiplied average, then un-premultiplied), so transparent texels never
+ * darken or tint the opaque ones. Fully transparent blocks fall back to the
+ * plain colour average. At coarse levels a cut-out pattern thins out, which
+ * is accepted. Opaque images give the plain linear-light average. Level 0 is
+ * the input itself.
  */
 export function buildMipChain(size: number, pixels: Uint8Array): MipLevel[] {
   if (pixels.length !== size * size * 4) {
@@ -369,25 +476,36 @@ export function buildMipChain(size: number, pixels: Uint8Array): MipLevel[] {
   const levels: MipLevel[] = [{ size, pixels }];
   let prev = pixels;
   let prevSize = size;
+  const sum = [0, 0, 0];
+  const plain = [0, 0, 0];
   while (prevSize > 1) {
     const s = Math.max(1, prevSize >> 1);
     const next = new Uint8Array(s * s * 4);
     for (let y = 0; y < s; y++) {
       for (let x = 0; x < s; x++) {
         const o = (y * s + x) * 4;
-        for (let ch = 0; ch < 4; ch++) {
-          let sum = 0;
-          for (let dy = 0; dy < 2; dy++) {
-            for (let dx = 0; dx < 2; dx++) {
-              const sx = Math.min(prevSize - 1, x * 2 + dx);
-              const sy = Math.min(prevSize - 1, y * 2 + dy);
-              const v = prev[(sy * prevSize + sx) * 4 + ch];
-              sum += ch === 3 ? v / 255 : SRGB_TO_LINEAR_LUT[v];
+        sum.fill(0);
+        plain.fill(0);
+        let alphaSum = 0;
+        for (let dy = 0; dy < 2; dy++) {
+          for (let dx = 0; dx < 2; dx++) {
+            const sx = Math.min(prevSize - 1, x * 2 + dx);
+            const sy = Math.min(prevSize - 1, y * 2 + dy);
+            const i = (sy * prevSize + sx) * 4;
+            const a = prev[i + 3] / 255;
+            alphaSum += a;
+            for (let ch = 0; ch < 3; ch++) {
+              const lin = SRGB_TO_LINEAR_LUT[prev[i + ch]];
+              sum[ch] += lin * a;
+              plain[ch] += lin;
             }
           }
-          const avg = sum / 4;
-          next[o + ch] = Math.round((ch === 3 ? avg : linearToSrgb(avg)) * 255);
         }
+        for (let ch = 0; ch < 3; ch++) {
+          const avg = alphaSum > 0 ? sum[ch] / alphaSum : plain[ch] / 4;
+          next[o + ch] = Math.round(linearToSrgb(avg) * 255);
+        }
+        next[o + 3] = Math.round((alphaSum / 4) * 255);
       }
     }
     levels.push({ size: s, pixels: next });

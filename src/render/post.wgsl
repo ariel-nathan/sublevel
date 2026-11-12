@@ -4,7 +4,8 @@
 // with nearest-neighbour (image-rendering: pixelated).
 
 struct Post {
-  // x = levels per channel minus one (31 for 5 bits), y = 1 to dither
+  // x = levels per channel minus one (31 for 5 bits), y = 1 to dither,
+  // z = 1 to pass the scene colour through untouched (raw debug views)
   params: vec4f,
 }
 
@@ -41,6 +42,10 @@ fn bayer4(p: vec2u) -> f32 {
 fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
   let p = vec2u(position.xy);
   let linear = textureLoad(scene, vec2i(p), 0).rgb;
+  if (post.params.z > 0.5) {
+    // Raw debug view: the scene target already holds the final colour.
+    return vec4f(clamp(linear, vec3f(0.0), vec3f(1.0)), 1.0);
+  }
   let srgb = linearToSrgb(linear);
   let levels = post.params.x;
   let threshold = select(0.5, bayer4(p), post.params.y > 0.5);

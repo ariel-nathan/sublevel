@@ -246,7 +246,19 @@ export function buildPlateMeshes(size: Vec3): MeshData[] {
   return [top.build(), sides.build()];
 }
 
-export const BUTTON_BEZEL = { half: 0.11, back: 0.046, proud: 0.004 };
+/**
+ * Button unit layout along its facing axis, in model space (origin at the
+ * centre of the button face, +Z out of the wall):
+ * - the knob runs from -BUTTON_LIT_HEIGHT to 0 (its cap is the button face);
+ * - the bezel runs from -BUTTON_DEPTH - BUTTON_EMBED to -BUTTON_LIT_HEIGHT;
+ * - the wall surface is at -BUTTON_DEPTH, so the bezel is sunk BUTTON_EMBED
+ *   into the wall (no face of it lies in the wall plane) and stands
+ *   BUTTON_DEPTH - BUTTON_LIT_HEIGHT proud of it.
+ * The level places `ButtonDef.position` BUTTON_DEPTH in front of the wall.
+ */
+export const BUTTON_DEPTH = 0.06;
+export const BUTTON_EMBED = 0.01;
+export const BUTTON_BEZEL_HALF = 0.11;
 export const BUTTON_LIT_RADIUS = 0.065;
 export const BUTTON_LIT_HEIGHT = 0.02;
 const BUTTON_SEGMENTS = 14;
@@ -261,17 +273,20 @@ export function buildButtonMeshes(): {
   red: MeshData;
   green: MeshData;
 } {
-  const { half, back, proud } = BUTTON_BEZEL;
+  const half = BUTTON_BEZEL_HALF;
+  const back = -BUTTON_DEPTH - BUTTON_EMBED;
+  const front = -BUTTON_LIT_HEIGHT;
   const bezel = new MeshBuilder("metal_panel");
-  box(bezel, 0, 0, (proud - back) / 2, half, half, (proud + back) / 2, {
+  box(bezel, 0, 0, (front + back) / 2, half, half, (front - back) / 2, {
     tileSize: 0.25,
+    skip: ["nz"],
   });
   const knob = (material: MaterialId): MeshData => {
     const b = new MeshBuilder(material);
-    const z0 = proud;
-    const z1 = proud + BUTTON_LIT_HEIGHT;
-    const front = v(0, 0, 1);
-    const centre = b.addVertex(v(0, 0, z1), front, { u: 0.5, v: 0.5 });
+    const z0 = front;
+    const z1 = 0;
+    const out = v(0, 0, 1);
+    const centre = b.addVertex(v(0, 0, z1), out, { u: 0.5, v: 0.5 });
     const capRim: number[] = [];
     const sideBottom: number[] = [];
     const sideTop: number[] = [];
@@ -282,7 +297,7 @@ export function buildButtonMeshes(): {
       const x = cos * BUTTON_LIT_RADIUS;
       const y = sin * BUTTON_LIT_RADIUS;
       capRim.push(
-        b.addVertex(v(x, y, z1), front, {
+        b.addVertex(v(x, y, z1), out, {
           u: 0.5 + cos * 0.5,
           v: 0.5 - sin * 0.5,
         }),

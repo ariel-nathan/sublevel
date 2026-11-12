@@ -28,6 +28,22 @@ import { PROP_SPECS } from "../core/props";
 
 const WALL = 0.3;
 
+/**
+ * Distance from the wall surface to a button's face (its `position`). Must
+ * match the depth of the world objects' button model (src/props/meshes.ts).
+ */
+export const BUTTON_DEPTH = 0.06;
+
+/**
+ * How far a door slab is inset from each face of its wall. The slab is
+ * thinner than the wall and centred in it, so it reads as recessed in its
+ * frame, and when open it is hidden entirely inside the wall.
+ */
+export const DOOR_INSET = 0.07;
+
+/** How far past the far jamb an open slab ends up, inside the wall. */
+export const DOOR_OVERTRAVEL = 0.05;
+
 interface Opening {
   a: number;
   b: number;
@@ -135,22 +151,21 @@ export function defineLevel(): LevelData {
     );
   };
 
-  /** Wall button on a wall facing +/-X. Returns the button face centre. */
+  /**
+   * Wall button on a wall facing +/-X. The world objects own all of its
+   * geometry (bezel, lit knob and collider); the level only says where the
+   * button face is: BUTTON_DEPTH in front of the wall surface.
+   */
   const buttonX = (
     face: number,
     dir: 1 | -1,
     y: number,
     z: number,
-    material: MaterialId,
-  ): { x: number; y: number; z: number } => {
-    const backA = dir > 0 ? face : face - 0.06;
-    const backB = dir > 0 ? face + 0.06 : face;
-    box(backA, y - 0.2, z - 0.12, backB, y + 0.2, z + 0.12, "metal_panel");
-    const btnA = dir > 0 ? backB : backA - 0.03;
-    const btnB = dir > 0 ? backB + 0.03 : backA;
-    box(btnA, y - 0.08, z - 0.08, btnB, y + 0.08, z + 0.08, material);
-    return { x: dir > 0 ? btnB : btnA, y, z };
-  };
+  ): { x: number; y: number; z: number } => ({
+    x: face + dir * BUTTON_DEPTH,
+    y,
+    z,
+  });
 
   /** Recessed ceiling fixture: thin emissive slab just below the ceiling. */
   const fixture = (
@@ -225,7 +240,7 @@ export function defineLevel(): LevelData {
     box(x0, 0, za, x1, 2.0, za + 0.05, "metal_panel");
     box(x0, 0, zb - 0.05, x1, 2.0, zb, "metal_panel");
     for (const y of [0.1, 0.7, 1.3, 1.9]) {
-      box(x0, y, za, x1, y + 0.04, zb, "metal_panel");
+      box(x0, y, za + 0.05, x1, y + 0.04, zb - 0.05, "metal_panel");
     }
   };
 
@@ -239,7 +254,7 @@ export function defineLevel(): LevelData {
     box(xa, 0, z0, xa + 0.05, 2.0, z1, "metal_panel");
     box(xb - 0.05, 0, z0, xb, 2.0, z1, "metal_panel");
     for (const y of [0.1, 0.7, 1.3, 1.9]) {
-      box(xa, y, z0, xb, y + 0.04, z1, "metal_panel");
+      box(xa + 0.05, y, z0, xb - 0.05, y + 0.04, z1, "metal_panel");
     }
   };
 
@@ -266,15 +281,15 @@ export function defineLevel(): LevelData {
   // Rubber baseboards.
   box(-4, 0, -3, 4, 0.1, -2.97, "rubber_dark");
   box(-4, 0, 2.97, 4, 0.1, 3, "rubber_dark");
-  box(-4, 0, -3, -3.97, 0.1, 3, "rubber_dark");
-  box(3.97, 0, -3, 4, 0.1, -0.7, "rubber_dark");
-  box(3.97, 0, 0.7, 4, 0.1, 3, "rubber_dark");
+  box(-4, 0, -2.97, -3.97, 0.1, 2.97, "rubber_dark");
+  box(3.97, 0, -2.97, 4, 0.1, -0.9, "rubber_dark");
+  box(3.97, 0, 0.9, 4, 0.1, 2.97, "rubber_dark");
 
   // Door A frame on both sides and its two buttons.
   frameX(4, -1, 0, 0.7, 2.2);
   frameX(4.3, 1, 0, 0.7, 2.2);
-  const labButton = buttonX(4, -1, 1.2, 1.2, "button_red");
-  const corridorButton = buttonX(4.3, 1, 1.2, -1.08, "button_red");
+  const labButton = buttonX(4, -1, 1.2, 1.2);
+  const corridorButton = buttonX(4.3, 1, 1.2, -1.08);
 
   // Lights: three recessed panels, steady cool white.
   for (const cx of [-2.4, 0, 2.4]) {
@@ -283,7 +298,7 @@ export function defineLevel(): LevelData {
   }
   // Ceiling beams.
   for (const x of [-1.2, 1.2])
-    box(x - 0.1, 2.85, -3, x + 0.1, 3, 3, "metal_panel");
+    box(x - 0.1, 2.85, -2.8, x + 0.1, 3, 2.8, "metal_panel");
   box(-4, 2.85, -3, 4, 3, -2.8, "metal_panel");
   box(-4, 2.85, 2.8, 4, 3, 3, "metal_panel");
 
@@ -341,17 +356,17 @@ export function defineLevel(): LevelData {
   box(8.3, -WALL, 5.5, 10.8, 0, 7.7, "concrete_floor");
   box(4.3, 2.8, -1.25, 10.8, 3.1, 1.25, "concrete_wall");
   box(8.3, 2.8, 1.25, 10.8, 3.1, 7.7, "concrete_wall");
-  wallAlongX(4, 11.1, -1.55, -1.25, -WALL, 3.1, "concrete_wall");
-  wallAlongZ(10.8, 11.1, -1.25, 8, -WALL, 3.1, "concrete_wall");
-  wallAlongX(4.3, 8.3, 1.25, 1.55, -WALL, 3.1, "concrete_wall");
-  wallAlongZ(8, 8.3, 1.25, 8, -WALL, 3.1, "concrete_wall");
+  wallAlongX(4.3, 11.1, -1.55, -1.25, -WALL, 3.1, "concrete_wall");
+  wallAlongZ(10.8, 11.1, -1.25, 7.7, -WALL, 3.1, "concrete_wall");
+  wallAlongX(4.3, 8, 1.25, 1.55, -WALL, 3.1, "concrete_wall");
+  wallAlongZ(8, 8.3, 1.25, 7.7, -WALL, 3.1, "concrete_wall");
 
   // Hazard bands near door A.
   box(4.4, 0.3, -1.25, 6.4, 0.6, -1.21, "hazard_stripe");
   box(4.4, 0.3, 1.21, 6.4, 0.6, 1.25, "hazard_stripe");
   // Pipes: along the north wall, round the bend and down the east wall.
   box(4.4, 2.4, -1.25, 10.8, 2.55, -1.1, "pipe");
-  box(10.65, 2.4, -1.25, 10.8, 2.55, 7.7, "pipe");
+  box(10.65, 2.4, -1.1, 10.8, 2.55, 7.7, "pipe");
   box(4.4, 2.65, 0.7, 10.8, 2.8, 0.85, "pipe");
   for (const x of [4.9, 6.4, 7.9, 9.4]) {
     box(x - 0.04, 2.25, -1.25, x + 0.04, 2.4, -1.1, "metal_panel");
@@ -372,7 +387,7 @@ export function defineLevel(): LevelData {
   for (const x of [5.5, 7.0]) {
     box(x, 1.0, 1.21, x + 0.6, 1.4, 1.25, "rubber_dark");
   }
-  box(8.25, 1.0, 3, 8.3, 1.4, 3.6, "rubber_dark");
+  box(8.3, 1.0, 3, 8.34, 1.4, 3.6, "rubber_dark");
   // Machine on the east wall with a feed pipe up to the run.
   box(10.3, 0, 3.2, 10.8, 1.6, 4.4, "metal_panel");
   box(10.3, 1.6, 3.2, 10.8, 1.65, 4.4, "rubber_dark");
@@ -492,19 +507,28 @@ export function defineLevel(): LevelData {
   // -------------------------------------------------------------------------
   // Doors, plate, buttons, sounds
   // -------------------------------------------------------------------------
+  // Slabs are recessed in their walls and slide along -Z right into them,
+  // stopping DOOR_OVERTRAVEL past the jamb so no face of an open slab lies in
+  // the jamb plane.
+  const slab = (
+    id: string,
+    wallX0: number,
+    wallX1: number,
+    z0: number,
+    z1: number,
+    height: number,
+  ): DoorDef => ({
+    id,
+    closed: {
+      min: v(wallX0 + DOOR_INSET, 0, z0),
+      max: v(wallX1 - DOOR_INSET, height, z1),
+    },
+    openOffset: v(0, 0, -(z1 - z0 + DOOR_OVERTRAVEL)),
+    material: "door_steel",
+  });
   const doors: DoorDef[] = [
-    {
-      id: "door_a",
-      closed: { min: v(4, 0, -0.7), max: v(4.3, 2.2, 0.7) },
-      openOffset: v(0, 0, -1.4),
-      material: "door_steel",
-    },
-    {
-      id: "door_b",
-      closed: { min: v(13.5, 0, 11.3), max: v(13.8, 2.4, 12.7) },
-      openOffset: v(0, 0, -1.6),
-      material: "door_steel",
-    },
+    slab("door_a", 4, 4.3, -0.7, 0.7, 2.2),
+    slab("door_b", 13.5, 13.8, 11.3, 12.7, 2.4),
   ];
   const buttons: ButtonDef[] = [
     {

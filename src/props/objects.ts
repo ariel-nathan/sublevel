@@ -25,6 +25,7 @@ import {
   spawnDebris,
 } from "./breakables";
 import { Door } from "./doors";
+import { buttonCollider } from "./fixtures";
 import {
   buildButtonMeshes,
   buildDoorMesh,
@@ -241,6 +242,9 @@ class WorldObjectsImpl implements WorldObjects {
       meshes.green,
     ]);
     for (const def of defs) {
+      // The unit is the only geometry of a button: it also stops rays and
+      // bodies, so aiming at it hits it.
+      this.physics.addStatic(buttonCollider(def));
       const facing = v3.normalize(def.facing);
       const matrix = composeInto(
         mat4.identity(),

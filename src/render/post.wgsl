@@ -1,11 +1,12 @@
-// Present pass: reads the linear scene target texel-for-texel, encodes sRGB,
-// then applies ordered dithering and quantises to a reduced colour depth.
-// The canvas is the same size as the scene target; the browser upscales it
-// with nearest-neighbour (image-rendering: pixelated).
+// Present pass: averages each block of the supersampled linear scene target
+// down to one output pixel, encodes sRGB, then applies ordered dithering and
+// quantises to a reduced colour depth. The browser upscales the canvas by a
+// whole factor with nearest-neighbour (image-rendering: pixelated).
 
 struct Post {
   // x = levels per channel minus one (31 for 5 bits), y = 1 to dither,
-  // z = 1 to pass the scene colour through untouched (raw debug views)
+  // z = 1 to pass the scene colour through untouched (raw debug views),
+  // w = supersampling factor (scene texels per output pixel on each axis)
   params: vec4f,
 }
 
@@ -41,11 +42,24 @@ fn bayer4(p: vec2u) -> f32 {
 @fragment
 fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
   let p = vec2u(position.xy);
-  let linear = textureLoad(scene, vec2i(p), 0).rgb;
+  // The scene target is `factor` times larger than the output on each axis.
+  let factor = max(1u, u32(post.params.w));
+  let origin = p * factor;
   if (post.params.z > 0.5) {
-    // Raw debug view: the scene target already holds the final colour.
-    return vec4f(clamp(linear, vec3f(0.0), vec3f(1.0)), 1.0);
+    // Raw debug view: the scene target already holds the final colour. Take
+    // one sample so exact values (pure white, pure magenta) are preserved.
+    let raw = textureLoad(scene, vec2i(origin), 0).rgb;
+    return vec4f(clamp(raw, vec3f(0.0), vec3f(1.0)), 1.0);
   }
+  // Average the block in linear light: this is what smooths edges and
+  // distant detail.
+  var sum = vec3f(0.0);
+  for (var y = 0u; y < factor; y++) {
+    for (var x = 0u; x < factor; x++) {
+      sum += textureLoad(scene, vec2i(origin + vec2u(x, y)), 0).rgb;
+    }
+  }
+  let linear = sum / f32(factor * factor);
   let srgb = linearToSrgb(linear);
   let levels = post.params.x;
   let threshold = select(0.5, bayer4(p), post.params.y > 0.5);

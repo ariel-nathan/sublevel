@@ -23,6 +23,7 @@ import {
   materialDebugColor,
   packFrameUniforms,
   packItem,
+  computePresentSize,
   packPostUniforms,
   selectLights,
   srgbToLinear,
@@ -245,9 +246,46 @@ test("frame and item layouts match the WGSL structs", () => {
 });
 
 test("packPostUniforms maps bits to levels", () => {
-  expect(Array.from(packPostUniforms(5, true))).toEqual([31, 1, 0, 0]);
-  expect(Array.from(packPostUniforms(8, true))).toEqual([255, 0, 0, 0]);
-  expect(Array.from(packPostUniforms(6, false))).toEqual([63, 0, 0, 0]);
+  expect(Array.from(packPostUniforms(5, true, "none", 1))).toEqual([
+    31, 1, 0, 1,
+  ]);
+  expect(Array.from(packPostUniforms(8, true, "none", 1))).toEqual([
+    255, 0, 0, 1,
+  ]);
+  expect(Array.from(packPostUniforms(6, false, "none", 2))).toEqual([
+    63, 0, 0, 2,
+  ]);
+});
+
+test("computePresentSize picks a whole upscale factor", () => {
+  // 1080 / 300 = 3.6 rounds to 4: every output pixel is 4 device pixels.
+  expect(computePresentSize(1920, 1080, 1, 300)).toEqual({
+    width: 480,
+    height: 270,
+    scale: 4,
+  });
+  // The device pixel ratio counts: 1536 x 864 CSS at 1.25 is 1920 x 1080.
+  expect(computePresentSize(1536, 864, 1.25, 300)).toEqual({
+    width: 480,
+    height: 270,
+    scale: 4,
+  });
+  // The output always covers the window, overhanging by under one pixel.
+  for (const [w, h] of [
+    [1280, 720],
+    [1366, 768],
+    [2560, 1440],
+    [801, 603],
+    [300, 200],
+  ]) {
+    const size = computePresentSize(w, h, 1, 300);
+    expect(Number.isInteger(size.scale)).toBe(true);
+    expect(size.scale).toBeGreaterThanOrEqual(1);
+    expect(size.width * size.scale).toBeGreaterThanOrEqual(w);
+    expect(size.width * size.scale - w).toBeLessThan(size.scale);
+    expect(size.height * size.scale).toBeGreaterThanOrEqual(h);
+    expect(size.height * size.scale - h).toBeLessThan(size.scale);
+  }
 });
 
 // --- Vertices ---------------------------------------------------------------

@@ -8,7 +8,9 @@ const MAX_PALETTE: u32 = 32u;
 // material, depth, normals) write their final colour straight to the target
 // and the present pass copies it untouched.
 // How many mip levels sharper than the GPU's default choice to sample.
-const MIP_BIAS: f32 = -1.5;
+// Supersampling already selects one level sharper per doubling, and the
+// present pass averages the result, so only a small extra bias is needed.
+const MIP_BIAS: f32 = -0.5;
 const VIEW_COVERAGE: u32 = 1u;
 const VIEW_MATERIAL: u32 = 2u;
 const VIEW_DEPTH: u32 = 3u;

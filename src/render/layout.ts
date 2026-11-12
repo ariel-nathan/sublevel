@@ -143,6 +143,47 @@ export function computeInternalSize(
   return { width, height };
 }
 
+/**
+ * How many times finer than the output the scene is rendered on each axis.
+ * The present pass averages each block down to one output pixel, which
+ * smooths edges and distant texture detail while keeping chunky pixels.
+ * 1 turns supersampling off.
+ */
+export const SUPERSAMPLE = 3;
+
+export interface PresentSize extends InternalSize {
+  /** Device pixels per output pixel on each axis: a whole number. */
+  scale: number;
+}
+
+/**
+ * Output size for a window, chosen so that every output pixel covers exactly
+ * `scale` x `scale` device pixels. A fractional upscale makes some pixels
+ * wider than others, which shows as wobbling edges when the view moves.
+ * The height lands as close to `targetHeight` as a whole scale allows; the
+ * image may overhang the window by less than one output pixel.
+ */
+export function computePresentSize(
+  windowWidth: number,
+  windowHeight: number,
+  pixelRatio: number,
+  targetHeight: number,
+): PresentSize {
+  const ratio = pixelRatio > 0 ? pixelRatio : 1;
+  const deviceWidth = Math.max(1, Math.round(windowWidth * ratio));
+  const deviceHeight = Math.max(1, Math.round(windowHeight * ratio));
+  const target = Math.min(
+    MAX_INTERNAL_HEIGHT,
+    Math.max(MIN_INTERNAL_HEIGHT, targetHeight || 0),
+  );
+  const scale = Math.max(1, Math.round(deviceHeight / target));
+  return {
+    width: Math.min(8192, Math.ceil(deviceWidth / scale)),
+    height: Math.ceil(deviceHeight / scale),
+    scale,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Vertex layout: position(3) normal(3) uv(2) color(3), float32, interleaved.
 // ---------------------------------------------------------------------------
@@ -421,13 +462,14 @@ export function packPostUniforms(
   colorBits: number,
   dither: boolean,
   debugView: DebugView = "none",
+  supersample: number = SUPERSAMPLE,
 ): Float32Array {
   const bits = Math.min(8, Math.max(1, Math.round(colorBits)));
   return new Float32Array([
     (1 << bits) - 1,
     dither && bits < 8 ? 1 : 0,
     isRawDebugView(debugView) ? 1 : 0,
-    0,
+    Math.max(1, Math.round(supersample)),
   ]);
 }
 

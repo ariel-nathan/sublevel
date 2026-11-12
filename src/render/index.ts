@@ -21,7 +21,6 @@ import type { MeshData } from "../core/mesh";
 import {
   buildMipChain,
   debugClearColor,
-  computeInternalSize,
   FRAME_BYTES,
   FRAME_FLOATS,
   interleaveVertices,
@@ -33,6 +32,8 @@ import {
   packPostUniforms,
   RETRO_COLOR_BITS,
   RETRO_DITHER,
+  SUPERSAMPLE,
+  computePresentSize,
   selectLights,
   VERTEX_OFFSETS,
   VERTEX_STRIDE,
@@ -382,11 +383,17 @@ export async function createRenderer(
   let postGroup: GPUBindGroup | null = null;
 
   function resize(windowWidth: number, windowHeight: number): void {
-    const size = computeInternalSize(
+    const pixelRatio =
+      typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    const size = computePresentSize(
       windowWidth,
       windowHeight,
+      pixelRatio,
       options.internalHeight,
     );
+    // Each output pixel is exactly `scale` device pixels wide and tall.
+    canvas.style.width = `${(size.width * size.scale) / pixelRatio}px`;
+    canvas.style.height = `${(size.height * size.scale) / pixelRatio}px`;
     if (size.width === width && size.height === height) {
       return;
     }
@@ -398,13 +405,13 @@ export async function createRenderer(
     depthTexture?.destroy();
     sceneTexture = device.createTexture({
       label: "scene color",
-      size: [width, height],
+      size: [width * SUPERSAMPLE, height * SUPERSAMPLE],
       format: SCENE_FORMAT,
       usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING,
     });
     depthTexture = device.createTexture({
       label: "scene depth",
-      size: [width, height],
+      size: [width * SUPERSAMPLE, height * SUPERSAMPLE],
       format: DEPTH_FORMAT,
       usage: TextureUsage.RENDER_ATTACHMENT,
     });

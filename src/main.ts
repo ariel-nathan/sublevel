@@ -7,6 +7,7 @@ import type {
   PlayerInput,
   PointLight,
   SoundId,
+  WorldEvent,
 } from "./core/api";
 import { createInput } from "./core/input";
 import { runLoop } from "./core/loop";
@@ -16,6 +17,7 @@ import { buildLevel } from "./level";
 import { mat4, quat, v3, type Vec3 } from "./math";
 import { createPhysicsWorld } from "./physics";
 import { createPlayer } from "./player";
+import { createWorldObjects } from "./props";
 import { createRenderer } from "./render";
 import { createTextureSet } from "./textures";
 
@@ -68,6 +70,18 @@ const FOOTSTEPS: Readonly<Record<SurfaceKind, SoundId>> = {
   rubber: "footstep_concrete",
 };
 
+const IMPACTS: Readonly<Record<SurfaceKind, SoundId>> = {
+  concrete: "impact_wood",
+  tile: "impact_plastic",
+  metal: "impact_metal",
+  wood: "impact_wood",
+  plastic: "impact_plastic",
+  rubber: "impact_plastic",
+};
+
+/** The player's weight on pressure plates, in kilograms. */
+const PLAYER_MASS = 80;
+
 const IDLE_INPUT: PlayerInput = {
   moveX: 0,
   moveZ: 0,
@@ -118,6 +132,14 @@ async function start(): Promise<void> {
     return "metal";
   };
 
+  const world = createWorldObjects({
+    level: level.data,
+    physics,
+    renderer,
+    seed: SEED,
+  });
+  let message: string | null = "Find the way out";
+  let messageTime = 5;
   const player = createPlayer({ physics, spawn: level.data.playerSpawn });
   const hud = createHud(document.body);
   const audio = createAudioSystem();
@@ -191,9 +213,36 @@ async function start(): Promise<void> {
       case "throw":
         audio.play("throw");
         break;
-      case "drop":
       case "use":
+        for (const used of world.use(event.hit)) {
+          onWorldEvent(used);
+        }
         break;
+      case "drop":
+        break;
+    }
+  };
+
+  const onWorldEvent = (event: WorldEvent): void => {
+    switch (event.type) {
+      case "impact": {
+        const strength = Math.min(1, event.impulse / 60);
+        audio.play(IMPACTS[event.surface], {
+          position: event.position,
+          gain: 0.25 + 0.75 * strength,
+          pitch: 1.15 - 0.3 * strength + Math.random() * 0.1,
+        });
+        break;
+      }
+      case "break":
+        audio.play("crate_break", { position: event.position });
+        break;
+      case "objective":
+        message = "Exit unlocked";
+        messageTime = 4;
+        break;
+      default:
+        audio.play(event.type, { position: event.position });
     }
   };
 
@@ -205,7 +254,20 @@ async function start(): Promise<void> {
         onPlayerEvent(event);
       }
       physics.step(dt);
-      physics.drainContacts();
+      const worldEvents = world.update(dt, {
+        contacts: physics.drainContacts(),
+        playerBox: player.box(),
+        playerMass: PLAYER_MASS,
+      });
+      for (const event of worldEvents) {
+        onWorldEvent(event);
+      }
+      if (player.heldBody !== null && !physics.getBody(player.heldBody)) {
+        player.releaseHeld();
+      }
+      if (messageTime > 0) {
+        messageTime -= dt;
+      }
     },
     render(alpha) {
       const camera = player.camera(alpha);
@@ -230,17 +292,26 @@ async function start(): Promise<void> {
       }));
       renderer.render({
         camera,
-        items: levelItems,
+        items: levelItems.concat(world.drawItems(alpha)),
         lights,
         ambient: level.data.ambient,
         fog: level.data.fog,
         time,
       });
+      const prompt = world.describe(player.aim);
       hud.update({
         playing: input.locked || debug.input !== null,
-        crosshair: player.heldBody !== null ? "holding" : "idle",
-        prompt: null,
-        message: null,
+        crosshair:
+          player.heldBody !== null ? "holding" : prompt ? "interact" : "idle",
+        prompt:
+          player.heldBody !== null
+            ? "E  Drop     Click  Throw"
+            : prompt === "Too heavy"
+              ? "Too heavy to lift"
+              : prompt
+                ? `E  ${prompt}`
+                : null,
+        message: messageTime > 0 ? message : null,
       });
     },
   });

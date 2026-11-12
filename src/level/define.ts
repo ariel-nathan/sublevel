@@ -324,9 +324,9 @@ export function defineLevel(): LevelData {
   box(-1.7, 1.2, 2.37, -1.2, 1.7, 2.4, "monitor_screen");
 
   // Props.
-  prop("monitor", -2.5, 0.85, -2.65);
-  prop("monitor", 2.0, 0.85, -2.65);
-  prop("monitor", 0, 0.85, 0);
+  prop("monitor", -2.5, 0.85, -2.65, Math.PI);
+  prop("monitor", 2.0, 0.85, -2.65, Math.PI);
+  prop("monitor", 0, 0.85, 0, Math.PI);
   prop("chair", -2.9, 0, 0.2, Math.PI / 2);
   prop("chair", 2.2, 0, -1.8);
   prop("crate_wood_small", -3.4, 0, 2.4);

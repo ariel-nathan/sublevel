@@ -16,12 +16,27 @@ import { PROP_KINDS } from "../core/api";
 import type { SurfaceKind } from "../core/materials";
 import type { MeshData } from "../core/mesh";
 import { PLAYER, PROP_SPECS } from "../core/props";
-import { buildLevel } from "../level";
+import { buildLevel, levelAir } from "../level";
+import {
+  boxRects,
+  coplanarOverlaps,
+  describeOverlap,
+  levelRects,
+  type FaceRect,
+} from "../level/coplanar";
+import { faceCells } from "../level/meshgen";
 import { mat4, quat, v3, type Vec3 } from "../math";
 import { createPhysicsWorld } from "../physics";
 import { BREAK_IMPULSE, DEBRIS_LIFETIME } from "./breakables";
 import { createWorldObjects } from "./index";
-import { buildPropMeshes } from "./meshes";
+import {
+  buttonCollider,
+  buttonParts,
+  doorSlabAt,
+  plateSlabAt,
+  type FixtureBox,
+} from "./fixtures";
+import { BUTTON_DEPTH, buildPropMeshes } from "./meshes";
 
 const FIXED_DT = 1 / 60;
 const BUILT = buildLevel();
@@ -937,5 +952,103 @@ describe("determinism", () => {
       last = rig.world.drawItems(i % 2 ? 0.25 : 0.75);
     }
     expect(last.length).toBeGreaterThan(20);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixtures against the level geometry (z-fighting)
+// ---------------------------------------------------------------------------
+
+describe("fixture geometry", () => {
+  const levelFaces = levelRects(
+    faceCells(LEVEL.brushes, levelAir(LEVEL)),
+    (n) => `brush #${n} ${LEVEL.brushes[n].material}`,
+  );
+  const rectsOf = (parts: FixtureBox[], tag = ""): FaceRect[] =>
+    parts.flatMap((p) =>
+      boxRects(`${p.owner}${tag}`, p.box.min, p.box.max, p.skip),
+    );
+  const TRAVEL = [0, 0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98, 1];
+
+  test("door slabs never share a plane and facing with a level face, anywhere along their travel", () => {
+    const found: string[] = [];
+    for (const door of LEVEL.doors) {
+      for (const t of TRAVEL) {
+        const rects = rectsOf([doorSlabAt(door, t)], ` at ${t}`);
+        found.push(...coplanarOverlaps(rects, levelFaces).map(describeOverlap));
+      }
+    }
+    expect(found).toEqual([]);
+  });
+
+  test("plate slabs, raised and pressed, never share a plane with the level", () => {
+    const found: string[] = [];
+    for (const plate of LEVEL.plates) {
+      for (const pressed of [false, true]) {
+        const rects = rectsOf(plateSlabAt(plate, pressed), ` ${pressed}`);
+        found.push(...coplanarOverlaps(rects, levelFaces).map(describeOverlap));
+      }
+    }
+    expect(found).toEqual([]);
+  });
+
+  test("button units never share a plane with the level and stand clear of their wall", () => {
+    const rects = rectsOf(LEVEL.buttons.flatMap(buttonParts));
+    expect(coplanarOverlaps(rects, levelFaces).map(describeOverlap)).toEqual(
+      [],
+    );
+    for (const def of LEVEL.buttons) {
+      const f = v3.normalize(def.facing);
+      const wall = v3.dot(def.position, f) - BUTTON_DEPTH;
+      for (const part of buttonParts(def)) {
+        const centre = v3.scale(v3.add(part.box.min, part.box.max), 0.5);
+        const half = Math.abs(
+          v3.dot(v3.scale(v3.sub(part.box.max, part.box.min), 0.5), f),
+        );
+        const front = v3.dot(centre, f) + half;
+        const back = v3.dot(centre, f) - half;
+        // Front at least 5 mm proud of the wall; back never in its plane.
+        expect(front - wall).toBeGreaterThanOrEqual(0.005);
+        expect(Math.abs(back - wall)).toBeGreaterThanOrEqual(0.005);
+      }
+      // The knob's cap is the button face.
+      const knob = buttonParts(def)[1].box;
+      const cap = Math.max(v3.dot(knob.min, f), v3.dot(knob.max, f));
+      expect(cap).toBeCloseTo(v3.dot(def.position, f), 9);
+    }
+  });
+
+  test("fixtures never share a plane with each other, in any combination of states", () => {
+    const found: string[] = [];
+    const buttons = rectsOf(LEVEL.buttons.flatMap(buttonParts));
+    for (const t of TRAVEL) {
+      for (const pressed of [false, true]) {
+        const all = [
+          ...rectsOf(LEVEL.doors.map((d) => doorSlabAt(d, t))),
+          ...rectsOf(LEVEL.plates.flatMap((p) => plateSlabAt(p, pressed))),
+          ...buttons,
+        ];
+        found.push(...coplanarOverlaps(all).map(describeOverlap));
+      }
+    }
+    expect(found).toEqual([]);
+  });
+
+  test("a button's collider covers its unit, so aiming at it hits it", () => {
+    const rig = makeRig([]);
+    for (const def of LEVEL.buttons) {
+      const f = v3.normalize(def.facing);
+      const origin = v3.addScaled(def.position, f, 1);
+      const hit = rig.physics.raycast(origin, v3.scale(f, -1), 2);
+      expect(hit).not.toBeNull();
+      expect(hit!.distance).toBeCloseTo(1, 4);
+      expect(hit!.collider.kind).toBe("static");
+      // The collider spans from inside the wall out to the button face.
+      const c = buttonCollider(def);
+      expect(Math.max(v3.dot(c.min, f), v3.dot(c.max, f))).toBeCloseTo(
+        v3.dot(def.position, f),
+        9,
+      );
+    }
   });
 });

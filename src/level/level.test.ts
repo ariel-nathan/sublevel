@@ -4,15 +4,26 @@ import { SOUND_IDS } from "../core/api";
 import { MATERIAL_IDS } from "../core/materials";
 import { PLAYER, PROP_SPECS } from "../core/props";
 import { AirGrid } from "./airgrid";
+import { coplanarOverlaps, describeOverlap, levelRects } from "./coplanar";
+import { BUTTON_DEPTH, DOOR_INSET } from "./define";
 import {
   boxesOverlap,
   boxOf,
+  BoxIndex,
   containsPoint,
   propBox,
+  regionCovered,
   segmentHitsBox,
   type Box,
 } from "./geometry";
-import { buildLevel } from "./index";
+import {
+  buildLevel,
+  isSkirting,
+  levelAir,
+  SKIRTING_COLLIDER_TOP,
+} from "./index";
+import { faceCells } from "./meshgen";
+import { TriangleGrid } from "./raymesh";
 
 const start = performance.now();
 const level = buildLevel();
@@ -22,6 +33,7 @@ const { data, meshes, colliders } = level;
 const brushes = data.brushes.map(boxOf);
 const propBoxes = data.props.map(propBox);
 const doorBoxes = data.doors.map((d) => boxOf(d.closed));
+const brushIndex = new BoxIndex(brushes);
 
 function shifted(b: Box, o: { x: number; y: number; z: number }): Box {
   return {
@@ -46,12 +58,24 @@ describe("level structure", () => {
     }
   });
 
-  test("one collider per brush", () => {
+  test("one collider per brush; skirting colliders are raised past the step height", () => {
     expect(colliders.length).toBe(data.brushes.length);
+    let skirting = 0;
     colliders.forEach((c, i) => {
-      expect(c.min).toEqual(data.brushes[i].min);
-      expect(c.max).toEqual(data.brushes[i].max);
+      const b = data.brushes[i];
+      expect(c.min).toEqual(b.min);
+      if (isSkirting(b)) {
+        skirting++;
+        expect(c.max).toEqual({ ...b.max, y: SKIRTING_COLLIDER_TOP });
+        expect(SKIRTING_COLLIDER_TOP - b.min.y).toBeGreaterThan(
+          PLAYER.stepHeight,
+        );
+      } else {
+        expect(c.max).toEqual(b.max);
+      }
     });
+    // The lab baseboards and the bench kick plates.
+    expect(skirting).toBe(7);
   });
 
   test("lighting setup", () => {
@@ -102,12 +126,30 @@ describe("doors, buttons and plates", () => {
     expect(data.plates.some((p) => p.target === "door_b")).toBe(true);
   });
 
-  test("door slabs exactly fill their doorway and slide clear into the wall", () => {
+  test("door slabs fill their doorway, recessed in the wall, and slide clear into it", () => {
     for (const door of data.doors) {
       const closed = boxOf(door.closed);
       // The doorway is empty of brushes...
       for (const b of brushes)
         expect(boxesOverlap(closed, b, 1e-4)).toBe(false);
+      // ...the slab is thinner than its wall, centred, inset from each face
+      // (so its faces never lie in a wall plane)...
+      const thin = closed.x1 - closed.x0 < closed.z1 - closed.z0 ? 0 : 2;
+      const lo = thin === 0 ? closed.x0 : closed.z0;
+      const hi = thin === 0 ? closed.x1 : closed.z1;
+      const mid = [
+        (closed.x0 + closed.x1) / 2,
+        closed.y1 + 0.01,
+        (closed.z0 + closed.z1) / 2,
+      ];
+      const lintel = brushes.find((b) =>
+        containsPoint(b, mid[0], mid[1], mid[2]),
+      )!;
+      expect(lintel).toBeDefined();
+      const wall0 = thin === 0 ? lintel.x0 : lintel.z0;
+      const wall1 = thin === 0 ? lintel.x1 : lintel.z1;
+      expect(lo - wall0).toBeCloseTo(DOOR_INSET, 6);
+      expect(wall1 - hi).toBeCloseTo(DOOR_INSET, 6);
       // ...and bounded on the sides and top by brushes (it fits exactly).
       const cx = (closed.x0 + closed.x1) / 2;
       const cy = (closed.y0 + closed.y1) / 2;
@@ -128,13 +170,18 @@ describe("doors, buttons and plates", () => {
       for (const [x, y, z] of needed) {
         expect(brushes.some((b) => containsPoint(b, x, y, z))).toBe(true);
       }
-      // Opening: it leaves the doorway and lands inside solid wall.
+      // Opening: it leaves the doorway and lands wholly inside solid wall,
+      // past the jamb, so that nothing of it can be seen.
       const open = shifted(closed, door.openOffset);
       expect(boxesOverlap(open, closed, 1e-4)).toBe(false);
-      const ox = (open.x0 + open.x1) / 2;
-      const oy = (open.y0 + open.y1) / 2;
-      const oz = (open.z0 + open.z1) / 2;
-      expect(brushes.some((b) => containsPoint(b, ox, oy, oz))).toBe(true);
+      expect(regionCovered(brushIndex, brushes, open)).toBe(true);
+      const gap = Math.min(
+        Math.abs(open.z1 - closed.z0),
+        Math.abs(open.x1 - closed.x0),
+        Math.abs(open.z0 - closed.z1),
+        Math.abs(open.x0 - closed.x1),
+      );
+      expect(gap).toBeGreaterThanOrEqual(0.02);
       // Doorway size.
       const width = alongZ ? closed.z1 - closed.z0 : closed.x1 - closed.x0;
       expect(width).toBeGreaterThanOrEqual(1.2);
@@ -147,11 +194,32 @@ describe("doors, buttons and plates", () => {
       expect(b.position.y).toBeGreaterThan(1.0);
       expect(b.position.y).toBeLessThan(1.4);
       expect(v3.length(b.facing)).toBeCloseTo(1);
-      // A wall lies just behind the button face.
-      const behind = v3.addScaled(b.position, b.facing, -0.1);
+      // The wall surface is exactly BUTTON_DEPTH behind the button face, and
+      // nothing of the level occupies the space of the button unit (the world
+      // objects own all of its geometry).
+      const behind = v3.addScaled(b.position, b.facing, -BUTTON_DEPTH - 0.001);
       expect(
         brushes.some((x) => containsPoint(x, behind.x, behind.y, behind.z)),
       ).toBe(true);
+      const f = b.facing;
+      const unit: Box = {
+        x0: b.position.x - (f.x !== 0 ? 0 : 0.15),
+        x1: b.position.x + (f.x !== 0 ? 0 : 0.15),
+        y0: b.position.y - 0.15,
+        y1: b.position.y + 0.15,
+        z0: b.position.z - (f.z !== 0 ? 0 : 0.15),
+        z1: b.position.z + (f.z !== 0 ? 0 : 0.15),
+      };
+      const wallward = v3.addScaled(b.position, f, -BUTTON_DEPTH + 0.0005);
+      const span: Box = {
+        x0: Math.min(unit.x0, wallward.x),
+        x1: Math.max(unit.x1, wallward.x),
+        y0: unit.y0,
+        y1: unit.y1,
+        z0: Math.min(unit.z0, wallward.z),
+        z1: Math.max(unit.z1, wallward.z),
+      };
+      for (const x of brushes) expect(boxesOverlap(span, x, 1e-6)).toBe(false);
       // Open air in front.
       const front = v3.addScaled(b.position, b.facing, 0.3);
       expect(
@@ -623,5 +691,130 @@ describe("meshes", () => {
         ),
       ).toBe(true);
     });
+  });
+});
+
+describe("visible geometry", () => {
+  const air = levelAir(data);
+  const faces = faceCells(data.brushes, air);
+
+  test("no two level faces share a plane, a facing and an area (z-fighting)", () => {
+    const label = (n: number) => `brush #${n} ${data.brushes[n].material}`;
+    const overlaps = coplanarOverlaps(levelRects(faces, label));
+    expect(overlaps.map(describeOverlap)).toEqual([]);
+  });
+
+  test("an open door slab is hidden inside solid wall all the way along", () => {
+    for (const door of data.doors) {
+      const closed = boxOf(door.closed);
+      // Every position from just past the jamb to fully open is in the wall.
+      const length = v3.length(door.openOffset);
+      const dir = v3.scale(door.openOffset, 1 / length);
+      const size = v3.sub(door.closed.max, door.closed.min);
+      const width = Math.abs(v3.dot(size, dir));
+      for (let t = width; t <= length + 1e-9; t += 0.05) {
+        const at = shifted(closed, v3.scale(dir, Math.min(t, length)));
+        const inWall = regionCovered(brushIndex, brushes, at);
+        expect([door.id, t, inWall]).toEqual([door.id, t, true]);
+      }
+    }
+  });
+
+  test("door volumes keep the jambs, lintel and sill around a recessed slab", () => {
+    for (const door of data.doors) {
+      const c = boxOf(door.closed);
+      const alongZ = c.x1 - c.x0 < c.z1 - c.z0;
+      // A point in each reveal, between the slab and the wall face.
+      const reveal = alongZ
+        ? [c.x0 - 0.03, c.x1 + 0.03]
+        : [c.z0 - 0.03, c.z1 + 0.03];
+      for (const r of reveal) {
+        const y = (c.y0 + c.y1) / 2;
+        const p = alongZ
+          ? [r, y, (c.z0 + c.z1) / 2]
+          : [(c.x0 + c.x1) / 2, y, r];
+        expect(air.reachable(p[0], p[1], p[2])).toBe(true);
+      }
+    }
+  });
+
+  test("sealed from the inside: rays from reachable air first hit a front face of the emitted mesh", () => {
+    const grid = new TriangleGrid(meshes);
+    // Sample points: a lattice over the level at floor, crouch, eye and
+    // jump height (and above the mezzanine), kept where the point is in air
+    // connected to the spawn and clear of every brush; plus points in each
+    // doorway (doors open) and its reveals, and in the alcove.
+    const points: number[][] = [];
+    const clear = (x: number, y: number, z: number): boolean => {
+      const probe: Box = {
+        x0: x - 0.04,
+        x1: x + 0.04,
+        y0: y - 0.04,
+        y1: y + 0.04,
+        z0: z - 0.04,
+        z1: z + 0.04,
+      };
+      return (
+        air.reachable(x, y, z) && brushIndex.overlapping(probe).length === 0
+      );
+    };
+    for (let x = -3.987; x < 16; x += 0.45) {
+      for (let z = -2.991; z < 16.3; z += 0.45) {
+        for (const y of [0.12, 0.9, 1.6, 2.1, 2.9, 3.6]) {
+          if (clear(x, y, z)) points.push([x, y, z]);
+        }
+      }
+    }
+    for (const door of data.doors) {
+      const c = boxOf(door.closed);
+      const alongZ = c.x1 - c.x0 < c.z1 - c.z0;
+      const across = alongZ
+        ? [c.x0 - 0.035, (c.x0 + c.x1) / 2, c.x1 + 0.035]
+        : [c.z0 - 0.035, (c.z0 + c.z1) / 2, c.z1 + 0.035];
+      for (const y of [0.15, 1.1, 2.0]) {
+        for (const s of [0.1, 0.5, 0.9]) {
+          for (const a of across) {
+            const along = alongZ
+              ? c.z0 + (c.z1 - c.z0) * s
+              : c.x0 + (c.x1 - c.x0) * s;
+            points.push(alongZ ? [a, y, along] : [along, y, a]);
+          }
+        }
+      }
+    }
+    for (const [x, z] of [
+      [14.2, 11.4],
+      [15.4, 12.6],
+      [14.8, 12],
+    ]) {
+      for (const y of [0.2, 1.5, 2.7]) points.push([x, y, z]);
+    }
+    expect(points.length).toBeGreaterThan(1500);
+
+    const rays = 64;
+    const failures: string[] = [];
+    let cast = 0;
+    const fmt = (p: readonly number[]) =>
+      `(${p.map((q) => q.toFixed(2)).join(", ")})`;
+    points.forEach((o, n) => {
+      const spin = n * 0.7548776662;
+      for (let i = 0; i < rays; i++) {
+        const y = 1 - (2 * (i + 0.5)) / rays;
+        const r = Math.sqrt(1 - y * y);
+        const a = i * Math.PI * (3 - Math.sqrt(5)) + spin;
+        const d = [Math.cos(a) * r, y, Math.sin(a) * r];
+        const hit = grid.cast(o, d, 60);
+        cast++;
+        if (!hit || !hit.front) {
+          const what = hit
+            ? `back of ${hit.material} at ${hit.t.toFixed(2)} m`
+            : "nothing";
+          failures.push(`from ${fmt(o)} towards ${fmt(d)}: ${what}`);
+        }
+      }
+    });
+    expect(cast).toBeGreaterThan(90000);
+    expect(failures.slice(0, 20)).toEqual([]);
+    expect(failures.length).toBe(0);
   });
 });

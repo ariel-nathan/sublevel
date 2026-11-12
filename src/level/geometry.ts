@@ -119,3 +119,126 @@ export function segmentHitsBox(
   }
   return !inside;
 }
+
+/** Uniform grid over boxes for point-in-any-box queries. */
+export class BoxIndex {
+  private readonly cell = 1;
+  private readonly map = new Map<number, number[]>();
+
+  constructor(private readonly boxes: readonly Box[]) {
+    boxes.forEach((b, n) => {
+      for (let i = Math.floor(b.x0); i <= Math.floor(b.x1); i++) {
+        for (let j = Math.floor(b.y0); j <= Math.floor(b.y1); j++) {
+          for (let k = Math.floor(b.z0); k <= Math.floor(b.z1); k++) {
+            const key = this.key(i, j, k);
+            const list = this.map.get(key);
+            if (list) list.push(n);
+            else this.map.set(key, [n]);
+          }
+        }
+      }
+    });
+  }
+
+  private key(i: number, j: number, k: number): number {
+    return ((i + 512) * 1024 + (j + 512)) * 1024 + (k + 512);
+  }
+
+  /** Indices of the boxes that overlap the region (with positive volume). */
+  overlapping(r: Box): number[] {
+    const out: number[] = [];
+    for (let i = Math.floor(r.x0); i <= Math.floor(r.x1); i++) {
+      for (let j = Math.floor(r.y0); j <= Math.floor(r.y1); j++) {
+        for (let k = Math.floor(r.z0); k <= Math.floor(r.z1); k++) {
+          const list = this.map.get(this.key(i, j, k));
+          if (!list) continue;
+          for (const n of list) {
+            if (!out.includes(n) && boxesOverlap(this.boxes[n], r)) out.push(n);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /** True if the point lies inside (or on the boundary of) any box. */
+  inside(x: number, y: number, z: number): boolean {
+    const list = this.map.get(
+      this.key(Math.floor(x), Math.floor(y), Math.floor(z)),
+    );
+    if (!list) return false;
+    for (const n of list) {
+      if (containsPoint(this.boxes[n], x, y, z)) return true;
+    }
+    return false;
+  }
+
+  /** True if the point lies strictly inside any box. */
+  insideStrict(x: number, y: number, z: number): boolean {
+    const list = this.map.get(
+      this.key(Math.floor(x), Math.floor(y), Math.floor(z)),
+    );
+    if (!list) return false;
+    for (const n of list) {
+      const b = this.boxes[n];
+      if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1)
+        return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * True if the union of the indexed boxes covers the whole region. Exact: the
+ * region is cut at every box boundary that crosses it and each piece's centre
+ * is tested.
+ */
+export function regionCovered(
+  index: BoxIndex,
+  boxes: readonly Box[],
+  r: Box,
+): boolean {
+  const ids = index.overlapping(r);
+  if (ids.length === 0) return false;
+  const xs = [r.x0, r.x1];
+  const ys = [r.y0, r.y1];
+  const zs = [r.z0, r.z1];
+  for (const n of ids) {
+    const b = boxes[n];
+    if (b.x0 > r.x0 && b.x0 < r.x1) xs.push(b.x0);
+    if (b.x1 > r.x0 && b.x1 < r.x1) xs.push(b.x1);
+    if (b.y0 > r.y0 && b.y0 < r.y1) ys.push(b.y0);
+    if (b.y1 > r.y0 && b.y1 < r.y1) ys.push(b.y1);
+    if (b.z0 > r.z0 && b.z0 < r.z1) zs.push(b.z0);
+    if (b.z1 > r.z0 && b.z1 < r.z1) zs.push(b.z1);
+  }
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+  zs.sort((a, b) => a - b);
+  for (let i = 0; i < xs.length - 1; i++) {
+    if (xs[i + 1] - xs[i] < 1e-9) continue;
+    const x = (xs[i] + xs[i + 1]) / 2;
+    for (let j = 0; j < ys.length - 1; j++) {
+      if (ys[j + 1] - ys[j] < 1e-9) continue;
+      const y = (ys[j] + ys[j + 1]) / 2;
+      for (let k = 0; k < zs.length - 1; k++) {
+        if (zs[k + 1] - zs[k] < 1e-9) continue;
+        const z = (zs[k] + zs[k + 1]) / 2;
+        if (!ids.some((n) => containsPoint(boxes[n], x, y, z))) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** The box grown by `d` on every side. */
+export function grow(b: Box, d: number): Box {
+  return {
+    x0: b.x0 - d,
+    y0: b.y0 - d,
+    z0: b.z0 - d,
+    x1: b.x1 + d,
+    y1: b.y1 + d,
+    z1: b.z1 + d,
+  };
+}

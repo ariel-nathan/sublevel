@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sublevel-dev",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["./index.html", "--port", "3210", "--console"],
+      "port": 3210
+    },
+    {
+      "name": "sublevel-dist",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["./dist/index.html", "--port", "3211"],
+      "port": 3211
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "sublevel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun ./index.html --port 3210 --console",
+    "gate": "bun check --no-script && bun fmt --check --no-script && bun test",
+    "dist": "bun build --compile --target=browser ./index.html --outdir=dist"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
+  }
+}

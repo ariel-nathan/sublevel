@@ -2,6 +2,17 @@
 // internal resolution. Layouts must match src/render/layout.ts.
 
 const MAX_LIGHTS: u32 = 32u;
+const MAX_PALETTE: u32 = 32u;
+
+// Debug views (ids from DEBUG_VIEW_IDS in layout.ts). The raw ones (coverage,
+// material, depth, normals) write their final colour straight to the target
+// and the present pass copies it untouched.
+const VIEW_COVERAGE: u32 = 1u;
+const VIEW_MATERIAL: u32 = 2u;
+const VIEW_DEPTH: u32 = 3u;
+const VIEW_NORMALS: u32 = 4u;
+const VIEW_LIGHTING: u32 = 5u;
+const DEPTH_RANGE: f32 = 40.0;
 
 struct Light {
   // xyz = position, w = radius
@@ -18,9 +29,11 @@ struct Frame {
   fogColor: vec4f,
   // x = fog far, y = time
   fogParams: vec4f,
-  // x = light count
+  // x = light count, y = debug view
   counts: vec4u,
   lights: array<Light, MAX_LIGHTS>,
+  // rgb = flat debug colour of each material, indexed by item.flags.z
+  palette: array<vec4f, MAX_PALETTE>,
 }
 
 struct Item {
@@ -75,8 +88,29 @@ fn vs(in: VertexIn) -> VertexOut {
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4f {
   // Sampled first, in uniform control flow, so mip selection is well defined.
-  let texel = textureSample(albedo, albedoSampler, in.uv).rgb;
+  let sampled = textureSample(albedo, albedoSampler, in.uv);
+  // Alpha test (cut-out textures); applies to every debug view too.
+  if (sampled.a < 0.5) {
+    discard;
+  }
+  let view = frame.counts.y;
   let item = items[in.item];
+  if (view == VIEW_COVERAGE) {
+    return vec4f(1.0, 1.0, 1.0, 1.0);
+  }
+  if (view == VIEW_MATERIAL) {
+    return vec4f(frame.palette[min(u32(item.flags.z), MAX_PALETTE - 1u)].rgb, 1.0);
+  }
+  if (view == VIEW_DEPTH) {
+    let range = distance(in.world, frame.cameraPos.xyz) / DEPTH_RANGE;
+    return vec4f(vec3f(1.0 - clamp(range, 0.0, 1.0)), 1.0);
+  }
+  if (view == VIEW_NORMALS) {
+    return vec4f(normalize(in.normal) * 0.5 + 0.5, 1.0);
+  }
+  let lightingOnly = view == VIEW_LIGHTING;
+  let texel = select(sampled.rgb, vec3f(1.0), lightingOnly);
+  let tint = select(item.tint.rgb, vec3f(1.0), lightingOnly);
   let baked = item.flags.x > 0.5;
   let emissive = item.flags.y > 0.5;
 
@@ -99,7 +133,7 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
     }
   }
 
-  let surface = texel * light * item.tint.rgb;
+  let surface = texel * light * tint;
   let fogNear = frame.fogColor.w;
   let fogFar = frame.fogParams.x;
   let dist = distance(in.world, frame.cameraPos.xyz);

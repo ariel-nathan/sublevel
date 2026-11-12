@@ -1,18 +1,26 @@
 import { expect, test } from "bun:test";
 import { mat4, quat, v3, type Mat4, type Vec3 } from "../math";
 import type { PointLight } from "../core/api";
+import { MATERIAL_IDS } from "../core/materials";
 import { MeshBuilder } from "../core/mesh";
 import postWgsl from "./post.wgsl" with { type: "text" };
 import sceneWgsl from "./scene.wgsl" with { type: "text" };
 import {
   buildMipChain,
   computeInternalSize,
+  DEBUG_DEPTH_RANGE,
+  debugClearColor,
+  DEBUG_VIEW_IDS,
   FRAME_FLOATS,
   FRAME_LIGHTS_OFFSET,
+  FRAME_PALETTE_OFFSET,
   interleaveVertices,
+  isRawDebugView,
   ITEM_FLOATS,
   linearToSrgb,
   MAX_LIGHTS,
+  MAX_PALETTE,
+  materialDebugColor,
   packFrameUniforms,
   packItem,
   packPostUniforms,
@@ -112,12 +120,12 @@ test("packItem writes model, normal matrix, tint and flags at the slot", () => {
     quat.identity(),
     v3.create(2, 2, 2),
   );
-  packItem(out, 1, model, v3.create(0.5, 0.25, 1), true, false);
+  packItem(out, 1, model, v3.create(0.5, 0.25, 1), true, false, 7);
   const o = ITEM_FLOATS;
   expect(Array.from(out.subarray(o, o + 16))).toEqual(Array.from(model));
   expect(out[o + 16]).toBeGreaterThan(0);
   expect(Array.from(out.subarray(o + 28, o + 36))).toEqual([
-    0.5, 0.25, 1, 1, 1, 0, 0, 0,
+    0.5, 0.25, 1, 1, 1, 0, 7, 0,
   ]);
   expect(out.subarray(0, ITEM_FLOATS).every((x) => x === 0)).toBe(true);
   packItem(out, 0, model, undefined, false, true);
@@ -228,7 +236,8 @@ test("packFrameUniforms clamps the light count and degenerate fog", () => {
 test("frame and item layouts match the WGSL structs", () => {
   // Frame: mat4 + 5 vec4 header, then MAX_LIGHTS lights of 2 vec4.
   expect(FRAME_LIGHTS_OFFSET).toBe(16 + 5 * 4);
-  expect(FRAME_FLOATS * 4).toBe(144 + MAX_LIGHTS * 32);
+  expect(FRAME_FLOATS * 4).toBe(144 + MAX_LIGHTS * 32 + MAX_PALETTE * 16);
+  expect(sceneWgsl).toContain(`const MAX_PALETTE: u32 = ${MAX_PALETTE}u;`);
   // Item: mat4 + 5 vec4.
   expect(ITEM_FLOATS).toBe(16 + 5 * 4);
   expect(sceneWgsl).toContain(`const MAX_LIGHTS: u32 = ${MAX_LIGHTS}u;`);

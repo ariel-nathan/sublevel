@@ -9,6 +9,7 @@
  */
 import { mat4 } from "../math";
 import type {
+  DebugView,
   MeshHandle,
   RenderFrame,
   Renderer,
@@ -19,6 +20,7 @@ import { MATERIAL_IDS, MATERIALS, type MaterialId } from "../core/materials";
 import type { MeshData } from "../core/mesh";
 import {
   buildMipChain,
+  debugClearColor,
   computeInternalSize,
   FRAME_BYTES,
   FRAME_FLOATS,
@@ -276,10 +278,11 @@ export async function createRenderer(
     size: 16,
     usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
   });
+  let debugView: DebugView = "none";
   device.queue.writeBuffer(
     postBuffer,
     0,
-    packPostUniforms(RETRO_COLOR_BITS, RETRO_DITHER),
+    packPostUniforms(RETRO_COLOR_BITS, RETRO_DITHER, debugView),
   );
 
   // Nearest everywhere, including between mip levels: crisp texels, and the
@@ -494,6 +497,7 @@ export async function createRenderer(
         fog: frame.fog,
         time: frame.time,
         lights: selectLights(frame.lights, camera.position, MAX_LIGHTS),
+        debugView,
       },
       frameData,
     );
@@ -518,6 +522,7 @@ export async function createRenderer(
         items[i].tint,
         mesh.hasColors,
         mesh.emissive,
+        mesh.materialIndex,
       );
       drawMeshes.push(mesh);
       drawOrder.push(slot);
@@ -535,9 +540,10 @@ export async function createRenderer(
       (a, b) => drawMeshes[a].materialIndex - drawMeshes[b].materialIndex,
     );
 
-    clearValue.r = frame.fog.color.x;
-    clearValue.g = frame.fog.color.y;
-    clearValue.b = frame.fog.color.z;
+    const clear = debugClearColor(debugView, frame.fog.color);
+    clearValue.r = clear.x;
+    clearValue.g = clear.y;
+    clearValue.b = clear.z;
 
     const encoder = device.createCommandEncoder({ label: "frame" });
     const scenePass = encoder.beginRenderPass({
@@ -597,8 +603,14 @@ export async function createRenderer(
     createMesh,
     destroyMesh,
     render,
-    setDebugView() {
-      // Not implemented yet: every view renders the normal image.
+    setDebugView(view) {
+      // Only uniforms change: no GPU resources are created.
+      debugView = view;
+      device.queue.writeBuffer(
+        postBuffer,
+        0,
+        packPostUniforms(RETRO_COLOR_BITS, RETRO_DITHER, view),
+      );
     },
   };
 }

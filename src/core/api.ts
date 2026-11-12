@@ -1,0 +1,430 @@
+/**
+ * Contracts between modules. Each module lives in its own folder under src/
+ * and exports exactly the factory named in its section below from its
+ * index.ts. Modules import types from here and never from each other.
+ */
+import type { Mat4, Quat, Vec3 } from "../math";
+import type { MaterialId } from "./materials";
+import type { MeshData } from "./mesh";
+
+// ---------------------------------------------------------------------------
+// Shared shapes
+// ---------------------------------------------------------------------------
+
+/** Axis-aligned box in world space. */
+export interface Aabb {
+  min: Vec3;
+  max: Vec3;
+}
+
+/** Linear RGB colour, each channel nominally 0..1. */
+export type Color = Vec3;
+
+// ---------------------------------------------------------------------------
+// Textures: src/textures/index.ts
+//   export function createTextureSet(seed: number): TextureSet
+// ---------------------------------------------------------------------------
+
+/** A square, tiling, procedurally generated texture. */
+export interface TextureImage {
+  material: MaterialId;
+  /** Power of two, 16 to 128. */
+  size: number;
+  /** RGBA8, sRGB-encoded, row-major from the top-left; length size*size*4. */
+  pixels: Uint8Array;
+}
+
+/** One image for every MaterialId. */
+export type TextureSet = ReadonlyMap<MaterialId, TextureImage>;
+
+// ---------------------------------------------------------------------------
+// Renderer: src/render/index.ts
+//   export function createRenderer(options: RendererOptions): Promise<Renderer>
+// ---------------------------------------------------------------------------
+
+export interface RendererOptions {
+  canvas: HTMLCanvasElement;
+  textures: TextureSet;
+  /** Internal render height in pixels; width follows the window aspect. */
+  internalHeight: number;
+}
+
+export interface MeshHandle {
+  readonly id: number;
+}
+
+export interface Camera {
+  position: Vec3;
+  orientation: Quat;
+  /** Vertical field of view in radians. */
+  fovY: number;
+  near: number;
+  far: number;
+}
+
+export interface PointLight {
+  position: Vec3;
+  color: Color;
+  /** Distance in metres at which the light reaches zero. */
+  radius: number;
+  /** Brightness multiplier; the game animates this for flicker. */
+  intensity: number;
+  /**
+   * True if this light is already included in the baked vertex colours of
+   * level meshes. Meshes with `colors` skip baked lights; meshes without
+   * `colors` (props, doors) are lit by every light.
+   */
+  baked: boolean;
+}
+
+export interface Fog {
+  color: Color;
+  /** Distance where fog starts. */
+  near: number;
+  /** Distance where fog is total. */
+  far: number;
+}
+
+export interface DrawItem {
+  mesh: MeshHandle;
+  /** Model matrix. */
+  transform: Mat4;
+  /** Optional colour multiplier. */
+  tint?: Color;
+}
+
+export interface RenderFrame {
+  camera: Camera;
+  items: readonly DrawItem[];
+  lights: readonly PointLight[];
+  /** Light added everywhere. */
+  ambient: Color;
+  fog: Fog;
+  /** Seconds since start, for animated effects. */
+  time: number;
+}
+
+export interface Renderer {
+  /** Current internal resolution. */
+  readonly width: number;
+  readonly height: number;
+  /** Call when the window size changes. */
+  resize(windowWidth: number, windowHeight: number): void;
+  createMesh(data: MeshData): MeshHandle;
+  destroyMesh(handle: MeshHandle): void;
+  render(frame: RenderFrame): void;
+}
+
+// ---------------------------------------------------------------------------
+// Physics: src/physics/index.ts
+//   export function createPhysicsWorld(options?: PhysicsOptions): PhysicsWorld
+// ---------------------------------------------------------------------------
+
+export interface PhysicsOptions {
+  /** Default (0, -9.81, 0). */
+  gravity?: Vec3;
+}
+
+export type ColliderKind = "static" | "kinematic" | "body";
+
+/** Identifies any collider in the world. Ids are unique within their kind. */
+export interface ColliderRef {
+  kind: ColliderKind;
+  id: number;
+}
+
+/** A dynamic rigid box. */
+export interface BodyDesc {
+  /** Centre of mass. */
+  position: Vec3;
+  orientation?: Quat;
+  halfExtents: Vec3;
+  /** Kilograms, greater than zero. */
+  mass: number;
+  /** Coulomb friction coefficient. Default 0.6. */
+  friction?: number;
+  /** Bounciness 0..1. Default 0.1. */
+  restitution?: number;
+  linearVelocity?: Vec3;
+  angularVelocity?: Vec3;
+  /** Free-form label for gameplay, e.g. the prop kind. */
+  tag?: string;
+}
+
+/** Read-only snapshot of a dynamic body. */
+export interface BodyState {
+  readonly id: number;
+  readonly position: Vec3;
+  readonly orientation: Quat;
+  readonly linearVelocity: Vec3;
+  readonly angularVelocity: Vec3;
+  readonly halfExtents: Vec3;
+  readonly mass: number;
+  readonly asleep: boolean;
+  readonly tag: string;
+}
+
+export interface RayHit {
+  collider: ColliderRef;
+  point: Vec3;
+  /** Unit surface normal at the hit, facing the ray origin. */
+  normal: Vec3;
+  distance: number;
+}
+
+/** A collision that began or strengthened during the last step. */
+export interface ContactEvent {
+  a: ColliderRef;
+  b: ColliderRef;
+  point: Vec3;
+  normal: Vec3;
+  /** Normal impulse in newton-seconds; use it to scale impact sounds. */
+  impulse: number;
+}
+
+export interface CharacterMoveOptions {
+  /** Ledges up to this height are climbed automatically. Default 0.3. */
+  stepHeight?: number;
+  /** A body to pass through, e.g. the one the player is carrying. */
+  ignoreBody?: number;
+  /** Mass used when the character pushes dynamic bodies. Default 80. */
+  pushMass?: number;
+}
+
+export interface CharacterMoveResult {
+  /** New centre of the character box. */
+  position: Vec3;
+  /** Velocity after sliding along whatever was hit. */
+  velocity: Vec3;
+  onGround: boolean;
+  /** Unit normal of the ground; (0, 1, 0) when airborne. */
+  groundNormal: Vec3;
+  /** What the character is standing on, if anything. */
+  standingOn: ColliderRef | null;
+  hitCeiling: boolean;
+}
+
+export interface PhysicsWorld {
+  gravity: Vec3;
+
+  /** Immovable world geometry. Returns its static id. */
+  addStatic(box: Aabb): number;
+
+  /**
+   * A box moved by game code (doors, lifts). It pushes dynamic bodies and
+   * blocks the character but is not affected by them.
+   */
+  addKinematic(box: Aabb): number;
+  /** Moves a kinematic box so that its minimum corner is at `min`. */
+  moveKinematic(id: number, min: Vec3): void;
+  removeKinematic(id: number): void;
+
+  addBody(desc: BodyDesc): number;
+  removeBody(id: number): void;
+  getBody(id: number): BodyState | undefined;
+  bodies(): readonly BodyState[];
+
+  /** Overwrites velocities and wakes the body. */
+  setBodyVelocity(id: number, linear: Vec3, angular?: Vec3): void;
+  /** Teleports a body and wakes it. */
+  setBodyPose(id: number, position: Vec3, orientation?: Quat): void;
+  /** Applies an impulse (N·s) at a world point, or at the centre if omitted. */
+  applyImpulse(id: number, impulse: Vec3, worldPoint?: Vec3): void;
+
+  /** Advances the simulation. Always called with the fixed timestep. */
+  step(dt: number): void;
+  /** Returns and clears the contact events gathered since the last call. */
+  drainContacts(): ContactEvent[];
+
+  /** Nearest hit along a ray. `direction` must be a unit vector. */
+  raycast(
+    origin: Vec3,
+    direction: Vec3,
+    maxDistance: number,
+    options?: { ignoreBody?: number },
+  ): RayHit | null;
+
+  /** Every collider whose bounds overlap the box. */
+  overlapBox(box: Aabb): ColliderRef[];
+
+  /**
+   * Moves an upright, axis-aligned character box by `velocity * dt`,
+   * colliding and sliding against statics, kinematics and dynamic bodies
+   * (which it pushes). Does not apply gravity: the caller owns the
+   * character's velocity. Call once per fixed step, before `step`.
+   */
+  moveCharacter(
+    center: Vec3,
+    halfExtents: Vec3,
+    velocity: Vec3,
+    dt: number,
+    options?: CharacterMoveOptions,
+  ): CharacterMoveResult;
+}
+
+// ---------------------------------------------------------------------------
+// Audio: src/audio/index.ts
+//   export function createAudioSystem(): AudioSystem
+//   export function renderSound(sound: SoundId, sampleRate: number): Float32Array
+// ---------------------------------------------------------------------------
+
+export const SOUND_IDS = [
+  "footstep_concrete",
+  "footstep_tile",
+  "footstep_metal",
+  "land",
+  "jump",
+  "impact_wood",
+  "impact_metal",
+  "impact_plastic",
+  "crate_break",
+  "pickup",
+  "throw",
+  "button_press",
+  "button_deny",
+  "door_open",
+  "door_close",
+  "plate_down",
+  "plate_up",
+  "hum_fluorescent",
+  "hum_machine",
+  "ambient_drone",
+] as const;
+
+export type SoundId = (typeof SOUND_IDS)[number];
+
+/** Sounds meant to be looped; all others are one-shots. */
+export const LOOPING_SOUNDS: readonly SoundId[] = [
+  "hum_fluorescent",
+  "hum_machine",
+  "ambient_drone",
+];
+
+export interface PlayOptions {
+  /** World position for 3D sounds; omit for a non-positional sound. */
+  position?: Vec3;
+  /** Volume multiplier. Default 1. */
+  gain?: number;
+  /** Playback rate multiplier. Default 1. */
+  pitch?: number;
+}
+
+export interface LoopHandle {
+  readonly id: number;
+}
+
+export interface AudioSystem {
+  /** Must be called from a user gesture before anything is audible. */
+  resume(): Promise<void>;
+  setListener(position: Vec3, forward: Vec3, up: Vec3): void;
+  play(sound: SoundId, options?: PlayOptions): void;
+  startLoop(sound: SoundId, options?: PlayOptions): LoopHandle;
+  stopLoop(handle: LoopHandle): void;
+  setMasterGain(gain: number): void;
+}
+
+// ---------------------------------------------------------------------------
+// Level: src/level/index.ts
+//   export function buildLevel(): BuiltLevel
+// ---------------------------------------------------------------------------
+
+export type LightFlicker = "none" | "fluorescent" | "broken";
+
+export interface LightDef {
+  position: Vec3;
+  color: Color;
+  radius: number;
+  intensity: number;
+  /** Steady lights are baked into level vertex colours; others are dynamic. */
+  flicker: LightFlicker;
+}
+
+export const PROP_KINDS = [
+  "crate_wood",
+  "crate_wood_small",
+  "crate_weak",
+  "crate_metal",
+  "barrel",
+  "chair",
+  "monitor",
+] as const;
+
+export type PropKind = (typeof PROP_KINDS)[number];
+
+export interface PropSpawn {
+  kind: PropKind;
+  /** Centre of the prop. */
+  position: Vec3;
+  /** Rotation about +Y in radians. */
+  yaw: number;
+}
+
+/** A sliding door. Something else (a button or plate) opens it by id. */
+export interface DoorDef {
+  id: string;
+  /** The door slab when closed. */
+  closed: Aabb;
+  /** How far the slab moves when fully open. */
+  openOffset: Vec3;
+  material: MaterialId;
+}
+
+/** A wall button the player presses with the use key. */
+export interface ButtonDef {
+  id: string;
+  /** Centre of the button face. */
+  position: Vec3;
+  /** Unit vector pointing out of the wall. */
+  facing: Vec3;
+  /** Id of the door it toggles. */
+  target: string;
+}
+
+/** A floor plate that holds a door open while enough mass rests on it. */
+export interface PressurePlateDef {
+  id: string;
+  /** The plate slab. */
+  box: Aabb;
+  /** Kilograms needed to trigger it. */
+  requiredMass: number;
+  /** Id of the door it holds open. */
+  target: string;
+}
+
+export interface SoundEmitterDef {
+  sound: SoundId;
+  position: Vec3;
+  gain: number;
+}
+
+/** Static world geometry: an axis-aligned box. */
+export interface Brush {
+  min: Vec3;
+  max: Vec3;
+  material: MaterialId;
+  /** Per-face overrides, keyed by BoxFace ("px", "ny", ...). */
+  faces?: Partial<Record<"px" | "nx" | "py" | "ny" | "pz" | "nz", MaterialId>>;
+}
+
+export interface LevelData {
+  name: string;
+  brushes: Brush[];
+  lights: LightDef[];
+  /** Feet position and facing of the player at start. */
+  playerSpawn: { position: Vec3; yaw: number };
+  props: PropSpawn[];
+  doors: DoorDef[];
+  buttons: ButtonDef[];
+  plates: PressurePlateDef[];
+  emitters: SoundEmitterDef[];
+  ambient: Color;
+  fog: Fog;
+}
+
+export interface BuiltLevel {
+  data: LevelData;
+  /** Level geometry, one mesh per material, with baked vertex colours. */
+  meshes: MeshData[];
+  /** One box per brush, for physics. */
+  colliders: Aabb[];
+}

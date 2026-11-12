@@ -6,7 +6,6 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun"],
     "strict": true,
-    "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "skipLibCheck": true

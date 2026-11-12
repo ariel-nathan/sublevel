@@ -288,6 +288,8 @@ export async function createRenderer(
   // Nearest everywhere, including between mip levels: crisp texels, and the
   // mips keep distant floors from turning to noise at 240p (as the classic
   // software renderers did with their own nearest-sampled mip levels).
+  /** Coarsest mip level the scene may sample (0 is full detail). */
+  const MAX_MIP_LEVEL = 2;
   const sampler = device.createSampler({
     label: "albedo",
     addressModeU: "repeat",
@@ -295,6 +297,9 @@ export async function createRenderer(
     magFilter: "nearest",
     minFilter: "nearest",
     mipmapFilter: "nearest",
+    // Never go coarser than this mip level: distant surfaces keep readable
+    // detail instead of fading to a flat average colour.
+    lodMaxClamp: MAX_MIP_LEVEL,
   });
 
   const materialIndex = new Map<MaterialId, number>();

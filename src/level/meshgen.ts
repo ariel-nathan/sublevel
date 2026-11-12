@@ -78,6 +78,12 @@ function breaks(lo: number, hi: number, extra: readonly number[]): number[] {
   return out;
 }
 
+/** Materials whose texture is fitted once to each brush face. */
+const FITTED_MATERIALS: ReadonlySet<MaterialId> = new Set([
+  "sign_warning",
+  "monitor_screen",
+]);
+
 /** One brush face cut into cells, with the cells that must be drawn. */
 export interface FaceCells {
   brush: number;
@@ -300,6 +306,15 @@ export function generateMeshes(
     const { basis, material } = f;
     const emissive = MATERIALS[material].emissive;
     const tile = TILE_SIZE[material];
+    // Signs and screens are pictures, not tiling surfaces: stretch the
+    // texture exactly once over the face instead of tiling it in world space.
+    const fitted = FITTED_MATERIALS.has(material);
+    const uMin = f.us[0];
+    const uMax = f.us[f.us.length - 1];
+    const vMin = f.vs[0];
+    const vMax = f.vs[f.vs.length - 1];
+    const uSpan = Math.max(uMax - uMin, 1e-6);
+    const vSpan = Math.max(vMax - vMin, 1e-6);
     const cache = new Map<string, number>();
     const builder = builderFor(material);
 
@@ -323,10 +338,16 @@ export function generateMeshes(
       const idx = builder.addVertex(
         { x: pos[0], y: pos[1], z: pos[2] },
         basis.normal,
-        {
-          u: (f.uSign * pos[f.u]) / tile,
-          v: (-f.vSign * pos[f.v]) / tile,
-        },
+        fitted
+          ? {
+              // One repeat across the face, upright, left to right.
+              u: (f.uSign > 0 ? pos[f.u] - uMin : uMax - pos[f.u]) / uSpan,
+              v: (f.vSign > 0 ? vMax - pos[f.v] : pos[f.v] - vMin) / vSpan,
+            }
+          : {
+              u: (f.uSign * pos[f.u]) / tile,
+              v: (-f.vSign * pos[f.v]) / tile,
+            },
         color,
       );
       cache.set(key, idx);

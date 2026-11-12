@@ -149,9 +149,10 @@ const CONTROLS: readonly (readonly [string, string])[] = [
   ["WASD", "Move"],
   ["Mouse", "Look"],
   ["Space", "Jump"],
-  ["Ctrl / C", "Crouch"],
+  ["C / Shift / Ctrl", "Crouch"],
   ["E", "Pick up / drop / use"],
   ["Left click", "Throw / shove"],
+  ["F", "Fullscreen"],
   ["Esc", "Release mouse"],
 ];
 

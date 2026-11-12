@@ -28,38 +28,32 @@ function saveReplay(recorder: ReplayRecorder): void {
  * while a movement key is held with Ctrl.
  *
  * A page can only receive those shortcuts itself while it is fullscreen with
- * the keyboard locked, so clicking to play also enters fullscreen. Where
- * that is unavailable or refused, closing the tab during play asks for
- * confirmation first.
+ * the keyboard locked. Fullscreen is opt-in (the F key); in a window,
+ * closing the tab during play asks for confirmation first.
  */
-function guardBrowserShortcuts(
-  canvas: HTMLCanvasElement,
-  isPlaying: () => boolean,
-): void {
+function guardBrowserShortcuts(isPlaying: () => boolean): void {
   const keyboard = (
     navigator as Navigator & {
       keyboard?: { lock?: (codes?: string[]) => Promise<void> };
     }
   ).keyboard;
-  canvas.addEventListener("mousedown", () => {
-    if (document.fullscreenElement) {
-      return;
-    }
-    document.documentElement
-      .requestFullscreen()
-      .then(() => keyboard?.lock?.())
-      .catch(() => {
-        // Fullscreen refused: the close confirmation below still applies.
-      });
-  });
-  // With the keyboard locked, a short Escape press reaches the page instead
-  // of leaving fullscreen, so release the mouse and fullscreen ourselves.
   window.addEventListener("keydown", (event) => {
-    if (event.code === "Escape") {
-      document.exitPointerLock();
+    if (event.code === "KeyF" && !event.repeat) {
       if (document.fullscreenElement) {
         void document.exitFullscreen();
+      } else {
+        document.documentElement
+          .requestFullscreen()
+          .then(() => keyboard?.lock?.())
+          .catch(() => {
+            // Fullscreen refused: the close confirmation still applies.
+          });
       }
+    }
+    // With the keyboard locked, a short Escape press reaches the page and no
+    // longer releases the mouse by itself.
+    if (event.code === "Escape") {
+      document.exitPointerLock();
     }
   });
   window.addEventListener("beforeunload", (event) => {
@@ -111,7 +105,7 @@ async function start(): Promise<void> {
     return;
   }
 
-  guardBrowserShortcuts(canvas, () => input.locked);
+  guardBrowserShortcuts(() => input.locked);
   const recorder = new ReplayRecorder();
   window.addEventListener("keydown", (event) => {
     if (event.code === "F8") {

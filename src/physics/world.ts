@@ -1312,14 +1312,19 @@ export class World implements PhysicsWorld {
       if (approach <= 0) {
         continue;
       }
+      // Wake first: a sleeping body reports zero inverse mass, which would
+      // make the effective mass infinite and the impulse NaN.
+      this.wake(b);
       const k = b.inverseMassAt(dx, dy, dz, rx, ry, rz);
+      if (!(k > 0)) {
+        continue;
+      }
       const mEff = 1 / k;
       const j = Math.min(
         (approach * pushMass * mEff) / (pushMass + mEff),
         maxPush,
       );
       pushed.add(b.id);
-      this.wake(b);
       b.applyImpulseAt(dx * j, dy * j, dz * j, rx, ry, rz);
     }
 

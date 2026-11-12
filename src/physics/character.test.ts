@@ -380,3 +380,47 @@ describe("moveCharacter", () => {
     expect(Math.abs(b.position.y - (p.pos.y + 0.3))).toBeLessThan(0.15);
   });
 });
+
+describe("pushing a sleeping body", () => {
+  test("wakes and moves it without corrupting its state", () => {
+    const w = floorWorld();
+    const spec = PROP_SPECS.barrel;
+    const barrel = w.addBody({
+      position: { x: 2, y: spec.halfExtents.y + 0.01, z: 0 },
+      halfExtents: spec.halfExtents,
+      mass: spec.mass,
+    });
+    const half = { x: 0.3, y: 0.9, z: 0.3 };
+    let position: Vec3 = { x: 0, y: 0.9, z: 0 };
+    // Stand still until the barrel has gone to sleep.
+    for (let i = 0; i < 90; i++) {
+      position = w.moveCharacter(
+        position,
+        half,
+        { x: 0, y: 0, z: 0 },
+        DT,
+      ).position;
+      w.step(DT);
+    }
+    expect(w.getBody(barrel)?.asleep).toBe(true);
+    // Walk into it.
+    for (let i = 0; i < 120; i++) {
+      position = w.moveCharacter(
+        position,
+        half,
+        { x: 5, y: 0, z: 0 },
+        DT,
+      ).position;
+      w.step(DT);
+      const body = w.getBody(barrel);
+      expect(Number.isFinite(body?.position.x)).toBe(true);
+      expect(Number.isFinite(body?.position.y)).toBe(true);
+      expect(Number.isFinite(body?.linearVelocity.x)).toBe(true);
+    }
+    const end = w.getBody(barrel);
+    expect(end?.position.x).toBeGreaterThan(2.5);
+    expect(Math.abs((end?.position.y ?? 0) - spec.halfExtents.y)).toBeLessThan(
+      0.05,
+    );
+  });
+});

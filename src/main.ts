@@ -23,6 +23,52 @@ function saveReplay(recorder: ReplayRecorder): void {
   }, 3000);
 }
 
+/**
+ * Stops browser shortcuts such as Ctrl+W (close tab) from ending the game
+ * while a movement key is held with Ctrl.
+ *
+ * A page can only receive those shortcuts itself while it is fullscreen with
+ * the keyboard locked, so clicking to play also enters fullscreen. Where
+ * that is unavailable or refused, closing the tab during play asks for
+ * confirmation first.
+ */
+function guardBrowserShortcuts(
+  canvas: HTMLCanvasElement,
+  isPlaying: () => boolean,
+): void {
+  const keyboard = (
+    navigator as Navigator & {
+      keyboard?: { lock?: (codes?: string[]) => Promise<void> };
+    }
+  ).keyboard;
+  canvas.addEventListener("mousedown", () => {
+    if (document.fullscreenElement) {
+      return;
+    }
+    document.documentElement
+      .requestFullscreen()
+      .then(() => keyboard?.lock?.())
+      .catch(() => {
+        // Fullscreen refused: the close confirmation below still applies.
+      });
+  });
+  // With the keyboard locked, a short Escape press reaches the page instead
+  // of leaving fullscreen, so release the mouse and fullscreen ourselves.
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") {
+      document.exitPointerLock();
+      if (document.fullscreenElement) {
+        void document.exitFullscreen();
+      }
+    }
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (isPlaying()) {
+      event.preventDefault();
+    }
+  });
+}
+
 async function start(): Promise<void> {
   const canvas = document.getElementById("view") as HTMLCanvasElement;
   const harnessMode = new URLSearchParams(location.search).has("harness");
@@ -47,9 +93,10 @@ async function start(): Promise<void> {
       lookDx: look.dx,
       lookDy: look.dy,
       jump: input.isDown("Space"),
-      // Not Ctrl: the browser closes the tab on Ctrl+W and a page cannot
-      // prevent that.
-      crouch: input.isDown("KeyC") || input.isDown("ShiftLeft"),
+      crouch:
+        input.isDown("ControlLeft") ||
+        input.isDown("KeyC") ||
+        input.isDown("ShiftLeft"),
       usePressed: use,
       primaryPressed: primary,
     };
@@ -64,6 +111,7 @@ async function start(): Promise<void> {
     return;
   }
 
+  guardBrowserShortcuts(canvas, () => input.locked);
   const recorder = new ReplayRecorder();
   window.addEventListener("keydown", (event) => {
     if (event.code === "F8") {

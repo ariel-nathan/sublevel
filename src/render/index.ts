@@ -597,5 +597,8 @@ export async function createRenderer(
     createMesh,
     destroyMesh,
     render,
+    setDebugView() {
+      // Not implemented yet: every view renders the normal image.
+    },
   };
 }

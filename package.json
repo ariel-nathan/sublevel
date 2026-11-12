@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "bun ./index.html --port 3210 --console",
     "gate": "bun check --no-script && bun fmt --check --no-script && bun test",
+    "e2e": "bun tools/e2e.ts",
+    "tour": "bun tools/tour.ts",
     "dist": "bun build --compile --target=browser ./index.html --outdir=dist"
   },
   "devDependencies": {

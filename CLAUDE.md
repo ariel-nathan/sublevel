@@ -20,11 +20,19 @@ A small first-person, physics-based game demo in the style of late-90s facility 
 
 Do not add a script named `check`, `fmt` or `test` to `package.json`: it would shadow Bun's built-in command of the same name. This Bun version has no `bun lint`.
 
+## Test harness
+
+Opening the game with `?harness` stops it running on its own and installs `window.__harness` (see `src/harness/index.ts`): step the simulation a fixed number of steps with scripted or real input, pin the camera, switch diagnostic views, capture the exact rendered frame, and read state and events. Runs are deterministic.
+
+`tools/browser.ts` (`launchGame()`) starts a private dev server and a headless copy of the installed Edge or Chrome and returns a session for driving the harness from a Bun script: `evaluate`, `captureFrame(path)` (exact internal-resolution PNG), `screenshot(path)` (whole page with HUD), and real trusted input (`keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`). Every session uses its own ports and profile, so any number can run in parallel: use this, not the shared browser pane, to look at the game. Write PNGs to `out/` and open them with the Read tool.
+
+In normal play, F8 downloads a replay of the whole session's inputs; `__harness.replay(file)` reproduces it exactly.
+
 ## Layout and ownership
 
 Each module owns one folder under `src/` and exports the factory named for it in `src/core/api.ts` from its `index.ts`.
 
-- `src/math/`, `src/core/`, `src/main.ts`, `index.html` — shared skeleton. Do not edit from a module branch; if a contract needs to change, say so in your report instead.
+- `src/math/`, `src/core/`, `src/game.ts`, `src/main.ts`, `src/harness/`, `index.html` — shared skeleton. Do not edit from a module branch; if a contract needs to change, say so in your report instead.
 - `src/textures/`, `src/render/`, `src/physics/`, `src/level/`, `src/audio/`, `src/player/`, `src/props/`, `src/hud/` — one module each.
 - `demos/<module>.html` — optional standalone page for looking at or listening to a module by itself.
 - `tools/` — development-only Bun scripts, never imported by the game. `tools/png.ts` writes PNG files so a module can dump a preview image into `out/` (git-ignored) and look at it.

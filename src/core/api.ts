@@ -104,6 +104,20 @@ export interface RenderFrame {
   time: number;
 }
 
+/**
+ * Diagnostic views for the test harness.
+ * - "none": the normal image.
+ * - "coverage": geometry drawn flat white on a pure magenta (255, 0, 255)
+ *   background, with no lighting, fog or dithering, so any magenta pixel is
+ *   a place where nothing was drawn.
+ * - "material": each material in its own flat colour, unlit and undithered.
+ * - "depth": distance from the camera as a grey ramp (near white, far black).
+ * - "normals": world-space normal encoded as colour (n * 0.5 + 0.5).
+ * - "lighting": lighting only, on white surfaces.
+ */
+export type DebugView =
+  "none" | "coverage" | "material" | "depth" | "normals" | "lighting";
+
 export interface Renderer {
   /** Current internal resolution. */
   readonly width: number;
@@ -113,6 +127,9 @@ export interface Renderer {
   createMesh(data: MeshData): MeshHandle;
   destroyMesh(handle: MeshHandle): void;
   render(frame: RenderFrame): void;
+  /** Switches the diagnostic view used by following 
+ender calls. */
+  setDebugView(view: DebugView): void;
 }
 
 // ---------------------------------------------------------------------------

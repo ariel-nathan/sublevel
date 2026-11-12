@@ -24,12 +24,17 @@ export interface Input {
 export function createInput(
   canvas: HTMLCanvasElement,
   onLock?: () => void,
+  options: { requireLock?: boolean } = {},
 ): Input {
   const down = new Set<string>();
   const pressed = new Set<string>();
   let dx = 0;
   let dy = 0;
-  const isLocked = (): boolean => document.pointerLockElement === canvas;
+  // Without requireLock, input is accepted without capturing the pointer
+  // (used by the test harness, where automation cannot capture it).
+  const requireLock = options.requireLock ?? true;
+  const isLocked = (): boolean =>
+    !requireLock || document.pointerLockElement === canvas;
 
   const press = (code: string): void => {
     if (!down.has(code)) {

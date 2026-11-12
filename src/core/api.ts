@@ -4,7 +4,7 @@
  * index.ts. Modules import types from here and never from each other.
  */
 import type { Mat4, Quat, Vec3 } from "../math";
-import type { MaterialId } from "./materials";
+import type { MaterialId, SurfaceKind } from "./materials";
 import type { MeshData } from "./mesh";
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ export interface PhysicsWorld {
   setBodyVelocity(id: number, linear: Vec3, angular?: Vec3): void;
   /** Teleports a body and wakes it. */
   setBodyPose(id: number, position: Vec3, orientation?: Quat): void;
-  /** Applies an impulse (N·s) at a world point, or at the centre if omitted. */
+  /** Applies an impulse (NÂ·s) at a world point, or at the centre if omitted. */
   applyImpulse(id: number, impulse: Vec3, worldPoint?: Vec3): void;
 
   /** Advances the simulation. Always called with the fixed timestep. */
@@ -427,4 +427,133 @@ export interface BuiltLevel {
   meshes: MeshData[];
   /** One box per brush, for physics. */
   colliders: Aabb[];
+}
+
+// ---------------------------------------------------------------------------
+// Player: src/player/index.ts
+//   export function createPlayer(options: PlayerOptions): Player
+// ---------------------------------------------------------------------------
+
+/** Player intent for one fixed step, sampled from Input by the game. */
+export interface PlayerInput {
+  /** Strafe, -1 (left) to 1 (right). */
+  moveX: number;
+  /** Forward, -1 (back) to 1 (forward). */
+  moveZ: number;
+  /** Mouse movement in pixels since the previous step. */
+  lookDx: number;
+  lookDy: number;
+  /** Held. */
+  jump: boolean;
+  /** Held. */
+  crouch: boolean;
+  /** Pressed this step: pick up, drop, or use what is looked at. */
+  usePressed: boolean;
+  /** Pressed this step: throw the held prop, or shove what is looked at. */
+  primaryPressed: boolean;
+}
+
+export interface PlayerOptions {
+  physics: PhysicsWorld;
+  /** Feet position and facing at start. */
+  spawn: { position: Vec3; yaw: number };
+}
+
+export type PlayerEvent =
+  | { type: "footstep"; on: ColliderRef | null }
+  | { type: "jump" }
+  | { type: "land"; speed: number; on: ColliderRef | null }
+  | { type: "pickup"; body: number }
+  | { type: "drop"; body: number }
+  | { type: "throw"; body: number }
+  /** The use key was pressed with nothing to pick up; `hit` is what was aimed at. */
+  | { type: "use"; hit: RayHit | null };
+
+export interface Player {
+  /** Position of the feet (bottom centre of the collision box). */
+  readonly feet: Vec3;
+  readonly velocity: Vec3;
+  readonly yaw: number;
+  readonly pitch: number;
+  readonly onGround: boolean;
+  readonly crouched: boolean;
+  readonly standingOn: ColliderRef | null;
+  /** Body currently carried, or null. */
+  readonly heldBody: number | null;
+  /** What the crosshair is on within reach, or null. */
+  readonly aim: RayHit | null;
+  /** Current collision box. */
+  box(): Aabb;
+  /** Advances one fixed step. Call before `physics.step`. */
+  update(dt: number, input: PlayerInput): PlayerEvent[];
+  /** Eye camera, interpolated between the last two steps by `alpha` (0..1). */
+  camera(alpha: number): Camera;
+  /** Lets go of the held body without throwing, e.g. because it was destroyed. */
+  releaseHeld(): void;
+}
+
+// ---------------------------------------------------------------------------
+// World objects (props, doors, buttons, plates): src/props/index.ts
+//   export function createWorldObjects(options: WorldObjectsOptions): WorldObjects
+// ---------------------------------------------------------------------------
+
+export interface WorldObjectsOptions {
+  level: LevelData;
+  physics: PhysicsWorld;
+  /** Used to register and free the meshes of props, doors, plates and buttons. */
+  renderer: Pick<Renderer, "createMesh" | "destroyMesh">;
+  /** Seed for debris and variation. */
+  seed: number;
+}
+
+export type WorldEvent =
+  | { type: "impact"; surface: SurfaceKind; position: Vec3; impulse: number }
+  | { type: "break"; position: Vec3 }
+  | { type: "button_press"; position: Vec3 }
+  | { type: "button_deny"; position: Vec3 }
+  | { type: "door_open"; position: Vec3 }
+  | { type: "door_close"; position: Vec3 }
+  | { type: "plate_down"; position: Vec3 }
+  | { type: "plate_up"; position: Vec3 }
+  /** The exit door has been opened for the first time. */
+  | { type: "objective" };
+
+export interface WorldObjects {
+  /**
+   * Advances doors, plates, breakables and debris by one fixed step. Call
+   * after `physics.step`, passing the contacts drained from it and the
+   * player's box and mass (the player also weighs down plates).
+   */
+  update(
+    dt: number,
+    context: { contacts: ContactEvent[]; playerBox: Aabb; playerMass: number },
+  ): WorldEvent[];
+  /** Handles the use key on whatever was aimed at. True if something reacted. */
+  use(hit: RayHit | null): WorldEvent[];
+  /** A short label for what is aimed at ("Press button", "Pick up"), or null. */
+  describe(hit: RayHit | null): string | null;
+  /** True if the body exists and is light enough to be carried. */
+  canCarry(body: number): boolean;
+  /** Draw list for this frame, interpolated between the last two steps. */
+  drawItems(alpha: number): DrawItem[];
+}
+
+// ---------------------------------------------------------------------------
+// HUD: src/hud/index.ts
+//   export function createHud(root: HTMLElement): Hud
+// ---------------------------------------------------------------------------
+
+export interface HudState {
+  /** False while the pointer is not captured: show the click-to-play overlay. */
+  playing: boolean;
+  crosshair: "idle" | "interact" | "holding";
+  /** Prompt shown under the crosshair, e.g. "E  Pick up". */
+  prompt: string | null;
+  /** Transient centre message, e.g. the objective; null to hide. */
+  message: string | null;
+}
+
+export interface Hud {
+  /** Cheap to call every frame; only touches the DOM when something changed. */
+  update(state: HudState): void;
 }

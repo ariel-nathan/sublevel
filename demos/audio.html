@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sublevel audio</title>
+    <style>
+      body {
+        margin: 16px;
+        background: #111;
+        color: #ccc;
+        font: 13px monospace;
+      }
+      #buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 12px 0;
+        max-width: 900px;
+      }
+      button {
+        background: #222;
+        color: #ddd;
+        border: 1px solid #444;
+        padding: 6px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #333;
+      }
+      button.on {
+        background: #264;
+        border-color: #6c8;
+      }
+      label {
+        display: inline-block;
+        margin-right: 16px;
+      }
+      canvas {
+        display: block;
+        margin-top: 12px;
+        border: 1px solid #333;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>sublevel audio</h3>
+    <div>click a sound; loops toggle</div>
+    <div id="buttons"></div>
+    <label
+      >master
+      <input id="master" type="range" min="0" max="1.5" step="0.01" value="1"
+    /></label>
+    <label
+      >gain
+      <input id="gain" type="range" min="0" max="3" step="0.01" value="1" />
+      <span id="gainv"></span
+    ></label>
+    <label
+      >pitch
+      <input id="pitch" type="range" min="0.5" max="2" step="0.01" value="1" />
+      <span id="pitchv"></span
+    ></label>
+    <label
+      ><input id="positional" type="checkbox" /> positional (circles the
+      listener)</label
+    >
+    <div id="status"></div>
+    <canvas id="wave" width="800" height="160"></canvas>
+    <script type="module" src="../src/audio/demo.ts"></script>
+  </body>
+</html>

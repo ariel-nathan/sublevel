@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sublevel: characters</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        image-rendering: pixelated;
+        cursor: grab;
+      }
+      #panel {
+        position: fixed;
+        left: 6px;
+        top: 6px;
+        color: #cfc;
+        font: 11px/1.5 monospace;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 4px 6px;
+        max-width: 250px;
+        user-select: none;
+      }
+      #panel label {
+        display: inline-block;
+        margin-right: 6px;
+      }
+      #panel select,
+      #panel input,
+      #panel button {
+        font: 11px monospace;
+        background: #121812;
+        color: #cfc;
+        border: 1px solid #3a4a3a;
+        padding: 0 2px;
+      }
+      #panel input[type="number"] {
+        width: 52px;
+      }
+      #panel.hidden > :not(#toggle) {
+        display: none;
+      }
+      #status {
+        white-space: pre;
+        color: #9b9;
+        margin-top: 2px;
+      }
+      body.capture #panel {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="panel">
+      <button id="toggle" title="hide or show the controls">=</button>
+      <div>
+        <label
+          >kind
+          <select id="kind">
+            <option value="scientist">scientist</option>
+            <option value="guard">guard</option>
+            <option value="mixed">mixed</option>
+          </select></label
+        >
+        <label>count <input id="count" type="number" min="1" max="16" /></label>
+      </div>
+      <div>
+        <label>seed <input id="seed" type="number" /></label>
+        <button id="reroll">new line-up</button>
+      </div>
+      <div>
+        <label
+          >clip
+          <select id="clip"></select
+        ></label>
+      </div>
+      <div>
+        <label>rate <input id="rate" type="number" min="1" max="60" /></label>
+        <label><input id="stepped" type="checkbox" /> stepped</label>
+      </div>
+      <div>
+        <label><input id="look" type="checkbox" /> look at camera</label>
+        <label><input id="talk" type="checkbox" /> talk</label>
+      </div>
+      <div>
+        <label><input id="walk" type="checkbox" /> walk past</label>
+        <label><input id="orbit" type="checkbox" /> auto-orbit</label>
+      </div>
+      <div>
+        <label
+          >view
+          <select id="view">
+            <option value="lineup">line-up</option>
+            <option value="threequarter">three-quarter</option>
+            <option value="side">side</option>
+            <option value="closeup">close-up</option>
+          </select></label
+        >
+        <label>who <input id="focus" type="number" min="0" /></label>
+      </div>
+      <div>drag: orbit, wheel: zoom</div>
+      <div id="status">starting</div>
+    </div>
+    <script type="module" src="../src/characters/demo.ts"></script>
+  </body>
+</html>

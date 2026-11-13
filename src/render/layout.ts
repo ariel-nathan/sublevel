@@ -13,7 +13,7 @@ import type {
   PointLight,
 } from "../core/api";
 import { MATERIAL_IDS } from "../core/materials";
-import type { MeshData } from "../core/mesh";
+import type { MeshData, MeshImage } from "../core/mesh";
 
 // ---------------------------------------------------------------------------
 // Debug views
@@ -558,6 +558,79 @@ const SRGB_TO_LINEAR_LUT = (() => {
 export interface MipLevel {
   size: number;
   pixels: Uint8Array;
+}
+
+// ---------------------------------------------------------------------------
+// Per-mesh images (MeshData.image)
+// ---------------------------------------------------------------------------
+
+/** Largest side of a mesh's own image. */
+export const MAX_MESH_IMAGE_SIZE = 256;
+
+/** Throws unless the image is square, a power of two up to the limit, RGBA8. */
+export function checkMeshImage(image: MeshImage): void {
+  const size = image.size;
+  if (
+    !Number.isInteger(size) ||
+    size < 1 ||
+    size > MAX_MESH_IMAGE_SIZE ||
+    (size & (size - 1)) !== 0
+  ) {
+    throw new Error(
+      `render: mesh image size ${size} is not a power of two from 1 to ${MAX_MESH_IMAGE_SIZE}`,
+    );
+  }
+  if (image.pixels.length !== size * size * 4) {
+    throw new Error(
+      `render: mesh image of size ${size} has ${image.pixels.length} bytes, expected ${size * size * 4}`,
+    );
+  }
+}
+
+/**
+ * Reference-counted resources keyed by object identity: the first `acquire`
+ * of a key creates the value, each further one shares it, and the `release`
+ * that drops the count to zero disposes of it. Each value gets a small
+ * sequential number (in creation order, never reused) for sorting draws.
+ */
+export class SharedResources<K extends object, V> {
+  private readonly entries = new Map<
+    K,
+    { value: V; refs: number; serial: number }
+  >();
+  private nextSerial = 0;
+
+  constructor(
+    private readonly create: (key: K) => V,
+    private readonly dispose: (value: V) => void,
+  ) {}
+
+  /** Number of live values. */
+  get size(): number {
+    return this.entries.size;
+  }
+
+  acquire(key: K): { value: V; serial: number } {
+    let entry = this.entries.get(key);
+    if (!entry) {
+      entry = { value: this.create(key), refs: 0, serial: this.nextSerial++ };
+      this.entries.set(key, entry);
+    }
+    entry.refs++;
+    return { value: entry.value, serial: entry.serial };
+  }
+
+  release(key: K): void {
+    const entry = this.entries.get(key);
+    if (!entry) {
+      return;
+    }
+    entry.refs--;
+    if (entry.refs <= 0) {
+      this.entries.delete(key);
+      this.dispose(entry.value);
+    }
+  }
 }
 
 /**

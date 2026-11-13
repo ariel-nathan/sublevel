@@ -29,7 +29,9 @@ import { IMPACT_BUTTON_DEPTH, type RoomModule, type RoomPlan } from "../room";
 import { WALL as W } from "../room";
 import { COOL, lamp, RED, signX, signZ, SODIUM, tank } from "./dress";
 import { buildShell, ENTRY_SIZE } from "./shell";
-import { pick, q } from "./util";
+import { offTheWay, pick, q } from "./util";
+
+type Pt2 = { x: number; z: number };
 
 export interface FanRoomParams {
   /** Length of the plant room (entry wall to bulkhead). */
@@ -248,21 +250,41 @@ function build(
   k.emitter("hum_machine", x1 - 0.5, 1.0, q((fz0 + fz1) / 2), 0.5);
 
   // --- Throwables -----------------------------------------------------------
+  const exitBefore = { x: exitX, z: z0 + 0.5 };
+  const walks: [Pt2, Pt2][] = [
+    [{ x: 0.8, z: 0 }, throwSpot],
+    [throwSpot, exitBefore],
+  ];
+  const spotRoom = { x0: x0 + 0.6, z0: z0 + 0.8, x1: xp - 0.6, z1: z1 - 1.5 };
   const spots = [
     { x: throwSpot.x - 0.9, z: wz - 1.1 },
     { x: throwSpot.x + 1.0, z: wz + 1.0 },
     { x: x0 + 1.2, z: z0 + 1.6 },
     { x: throwSpot.x - 1.6, z: z0 + 1.4 },
-  ].map((c) => ({
-    x: q(Math.min(xp - 0.6, Math.max(x0 + 0.6, c.x))),
-    z: q(Math.min(z1 - 1.5, Math.max(z0 + 0.8, c.z))),
-  }));
+  ]
+    .map((c) => ({
+      x: q(Math.min(xp - 0.6, Math.max(x0 + 0.6, c.x))),
+      z: q(Math.min(z1 - 1.5, Math.max(z0 + 0.8, c.z))),
+    }))
+    // Off the solution's walks: a turned crate's box is up to 0.35 m from
+    // its centre, the player's 0.3 m, and boxes passing at an angle need
+    // up to 1.4 times their half-widths.
+    .map((c) => offTheWay(c, walks, 0.9, spotRoom))
+    .filter((c): c is { x: number; z: number } => c !== null);
   const crates = spots
     .slice(0, p.crates)
     .map((c) =>
       k.propTurned("crate_wood_small", c.x, 0, c.z, rng.range(-0.4, 0.4)),
     );
-  k.propTurned("monitor", q(x0 + 2.4), 0, q(z0 + 2.8), rng.range(0, 6));
+  const monitor = offTheWay(
+    { x: q(x0 + 2.4), z: q(z0 + 2.8) },
+    walks,
+    0.85,
+    spotRoom,
+  );
+  if (monitor) {
+    k.propTurned("monitor", monitor.x, 0, monitor.z, rng.range(0, 6));
+  }
   k.propTurned("chair", x0 + 0.7, 0, z0 + 0.7, rng.range(0, 6));
 
   const P = s.P;

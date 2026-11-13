@@ -200,7 +200,10 @@ function build(
     B(a, -W, b, c, 0, d, "metal_panel"),
   );
   B(drain.x0, -0.045, drain.z0, drain.x1, 0, drain.z1, "metal_grate");
-  B(drain.x0, -W, drain.z0, drain.x1, -0.2, drain.z1, "concrete_floor");
+  // The sump under the grate: a 0.2 m slab (a 0.1 m one is thinner than
+  // the 0.1 m air grids' voxels whenever they are not aligned with it, and
+  // the seal checks would see a hole).
+  B(drain.x0, -W, drain.z0, drain.x1, -0.1, drain.z1, "concrete_floor");
 
   // --- The partition with the inner door (D1) -------------------------------
   B(xp, 0, z0, lx0, h, i0, "metal_panel");

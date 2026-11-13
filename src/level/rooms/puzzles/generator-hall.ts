@@ -35,7 +35,9 @@ import {
   tank,
 } from "./dress";
 import { buildShell, ENTRY_SIZE } from "./shell";
-import { pick, q } from "./util";
+import { offTheWay, pick, q } from "./util";
+
+type Pt2 = { x: number; z: number };
 
 export interface GeneratorHallParams {
   length: number;
@@ -215,6 +217,15 @@ function build(
   // Ahead of the throw spot on the side away from the exit, behind it on
   // the side away from the entry axis: off the ways in and out.
   const tz = throwSpot.z;
+  const walks: [Pt2, Pt2][] = [
+    [{ x: 0.8, z: 0 }, throwSpot],
+    [throwSpot, { x: x1 - 0.5, z: exitZ }],
+  ];
+  const spotRoom = { x0: x0 + 0.6, z0: z0 + 0.6, x1: x1 - 0.6, z1: z1 - 0.6 };
+  const furniture = [
+    { x0: x0 + 0.3, z0: z0 + 0.3, x1: x0 + 1.3, z1: z0 + 1.3 },
+    ...(dx1 - dx0 > 1.0 ? [{ x0: dx0, z0: z1 - 0.8, x1: dx1, z1 }] : []),
+  ];
   const away = tz - exitZ >= 0 ? 1 : -1;
   const out = tz >= 0 ? 1 : -1;
   const spots = [
@@ -234,6 +245,19 @@ function build(
           c.x > gx0 - 0.5 &&
           c.x < gx1 + 0.5 &&
           (c.z < z0 + 1.9 || c.z > z1 - 1.9)
+        ),
+    )
+    // Off the solution's walks, and clear of the desk and the fuel tank.
+    .map((c) => offTheWay(c, walks, 0.9, spotRoom))
+    .filter(
+      (c): c is { x: number; z: number } =>
+        c !== null &&
+        !furniture.some(
+          (f) =>
+            c.x + 0.36 > f.x0 &&
+            c.x - 0.36 < f.x1 &&
+            c.z + 0.36 > f.z0 &&
+            c.z - 0.36 < f.z1,
         ),
     )
     // Clamping to the walls can bring two spots together: keep a crate's

@@ -124,7 +124,7 @@ function draw(sheet: Sheet, path: string): Promise<void> {
   let at = sheet.start;
   const props = sheet.props.map((p) => ({ ...p.position }));
   for (const s of sheet.solution) {
-    if (s.do === "walk") {
+    if (s.do === "walk" || s.do === "climb") {
       line(at, s.to, [80, 140, 255]);
       at = s.to;
     } else if (s.do === "carry" || s.do === "push") {

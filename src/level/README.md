@@ -4,7 +4,8 @@ A level is a chain of **room modules** joined at doorways. The **assembler**
 (`assemble.ts`) places them, checks the rules below and gathers what they
 build into one `LevelData`; `buildLevel` / `buildLevelFrom` (`index.ts`) then
 bakes meshes and colliders from it. The hand-built level, Kestrel Annex, is
-six modules (`define.ts`); a generator will chain modules from a seed.
+six modules (`define.ts`); the generator (`gen/`, `?seed=N`) chains modules
+from a seed.
 
 | File                                | What                                                                                                 |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -14,7 +15,8 @@ six modules (`define.ts`); a generator will chain modules from a seed.
 | `rooms/registry.ts`                 | Every module. Add yours here                                                                         |
 | `rooms/corridor.ts`                 | The reference parametric module: a plain corridor                                                    |
 | `rooms/lab.ts` ... `egress-lock.ts` | Kestrel Annex's six modules                                                                          |
-| `rooms/contract.test.ts`            | The contract, checked for every registered module in 8 orientations                                  |
+| `rooms/contract.ts`                 | `contractProblems(module, options)`: the contract as a reusable check (8 orientations)               |
+| `rooms/contract.test.ts`            | The contract, checked for every registered module                                                    |
 | `rooms/puzzles/`                    | The library of parametric puzzle rooms (see "Puzzle rooms")                                          |
 | `dev.ts`                            | `buildRoomsLevel`: development levels from module names (`?rooms=`)                                  |
 | `assemble.ts`                       | `assembleLevel(plan)`, `buildRoom`, `planRoom`, `place`                                              |
@@ -31,6 +33,11 @@ export const MY_ROOM: RoomModule<MyParams> = {
   difficulty: 1,              // 0..3
   requires: {},               // e.g. { carryMass: 45 } if the key must be brought in
   entrySize: { width: [1.2, 2.0], height: [2.2, 2.6] }, // doorways it can be built from
+  // Optional, for the generator's mission (gen/mission.ts):
+  after: ["timed-door"],      // mechanics an earlier room must have taught
+  position: "early",          // "first" (first puzzle room when in the run) | "early" (first half)
+  idea: "my-idea",            // shared with a re-take: never adjacent, preferably not both in a run
+  setPiece: false,            // an authored set piece: at most once, a few per run
   defaults: { ... },
   random: (rng) => ({ ... }), // a random choice within the stated ranges
   build(ctx, at, params) { ...; return plan; },
@@ -116,9 +123,14 @@ generator must check (the assembler throws).
   walks the player through each doorway on its axis, so keep the axis clear
   of anything you leave in a doorway. Rules the bot (tools/solver.ts)
   relies on and `verifySolution` checks:
-  - `walk`: a straight line on the floor (a brush top at the feet's height)
-    clear of brushes and of props where they are then. Add as many points
-    as it takes to get round furniture.
+  - `walk`: a straight line on the floor (a brush top, or a prop's top, at
+    the feet's height) clear of brushes and of props where they are then.
+    Add as many points as it takes to get round furniture. A `walk` to a
+    lower point steps off an edge (a drop of up to 2.5 m, landing within
+    0.6 m of it); up more than a step is a `climb`.
+  - `climb`: jump onto a surface at most `PLAYER.jumpHeight` (1 m) above
+    the feet and 1.6 m away, with a 0.3 m square of it to land on and
+    headroom all the way (`to` is where the feet end).
   - `press`: from where the player stands, the button within
     `PLAYER.reach - 0.3` of the eye and in front of it (`canPress`).
   - `carry`: the player fetches the prop (walks to 1.3 m of it if farther
@@ -142,12 +154,15 @@ generator must check (the assembler throws).
 
 Add the module to `rooms/registry.ts`. Then:
 
-- `bun test src/level`: the contract tests build it in each facing, mirrored
-  and not, with its defaults and 4 random parameter sets, at its smallest and
-  largest entry size, and check: footprint containment, doorways on the
-  boundary, the exit reachable from the entry once the lock is open and
-  not before (flood fill at 0.1 m), the solution (`verifySolution`), zones,
-  light bounds, unique ids across two instances, determinism.
+- `bun test src/level`: the contract tests (`contractProblems` in
+  `rooms/contract.ts`) build it in each facing, mirrored and not, with its
+  defaults and 4 random parameter sets, at its smallest and largest entry
+  size, and check: footprint containment, doorways on the boundary, the
+  exit reachable from the entry once the lock is open and not before (flood
+  fill at 0.1 m), props (none in a brush or another prop, each resting on
+  something), the solution (`verifySolution`), zones, light bounds, unique
+  ids across two instances, determinism. A module outside the registry can
+  call `contractProblems` from its own test (`gen/modules/contract.test.ts`).
 - `bun tools/room-plan.ts my-room [--facing -z] [--mirror] [--seed 3]`: a
   top-down plan in `out/room-plan/` (brushes, props, footprint in red,
   doorways in green, the solution's path in blue). `annex` draws the level.
@@ -158,8 +173,10 @@ Add the module to `rooms/registry.ts`. Then:
   the lab, your module and an exit. To play it with the solver bot:
   `bun src/level/rooms/puzzles/prove.ts my-room --seeds 0,1,2,3`; and
   `bun src/level/rooms/puzzles/look.ts my-room --seed 0 [--view coverage]`
-  renders viewpoints in it. Once the generator is wired (`?seed=N`),
-  `bun tools/solve.ts --seed N` plays a whole run.
+  renders viewpoints in it; `bun tools/solve.ts --rooms my-room --seed 1`
+  plays it once with failure artefacts. `bun tools/solve.ts --seed N` plays
+  a whole generated run, `bun tools/check-seed.ts --seed N` checks one
+  completely (see tools/README.md).
 
 ## Puzzle rooms
 
@@ -186,36 +203,40 @@ development levels.
 | `fan-room`         | impact target through a window       | 3          |
 | `pump-gallery`     | timed door, wedge it through a hatch | 2          |
 | `decon-lock`       | plate holds door 1, timed door 2     | 3          |
-| `exit-lock`        | finish (walled entry, exit box)      | 0          |
-| `maintenance-loft` | climb a crate staircase (pending)    | 2          |
+| `maintenance-loft` | climb a crate staircase              | 2          |
+| `exit-lock`        | finish (walled entry, sealed hatch)  | 0          |
 
-`PENDING_MODULES` (the loft) are complete rooms whose solution needs a step
-the format lacks (climbing onto props: a `walk` is on brush floor only, so
-`verifySolution` and the bot cannot do it); they are not in the registry
-and the generator must not use them. Their solutions write a climb as a
-`walk` whose target is higher than the feet, which `prove.ts` plays as a
-walk holding jump.
+The mission's ordering advice is data on the modules: `records-office` has
+`position: "first"`, `freight-passage` `position: "early"`, `decon-lock`
+`after: ["weighted-plate", "timed-door"]`; `pump-gallery` shares the idea
+`timed-door-wedge` with the filtration hall, `generator-hall` `high-target`
+with the valve chamber, `goods-bay` `crates-on-plate` with the storage room.
+Teach-first ordering (each mechanic's first room is its easiest) follows
+from `difficulty`. `PENDING_MODULES` is for complete rooms not yet ready for
+the generator (development levels can name them); it is empty.
 
 Things learned writing them: a carry is one straight walk from where the
 prop is picked up to where it is let go, so carrying round a corner takes
-two carries (set it down on the way); the verifier sizes props by their
-spawn yaw for good, so set-down spots approached diagonally can overlap a
-prop set down before (approach along an axis); `wait` counts events since
-the previous step began, so put it straight after the step that causes
-the event; the bot's `setDown` tilts the view before stepping back, which
-drags a crate picked off a ledge into the ledge (put props to fetch on
-floors, or tell the tools).
+two carries (set it down on the way); `wait` counts events since the
+previous step began, so put it straight after the step that causes the
+event. A prop the solution has moved is checked as an axis-aligned box of
+its largest horizontal half-extent (the bot sets props down at whatever
+turn they end up with). Leave 0.3 m between crates set down next to each
+other: one set down a little off can knock the other.
 
 ## Development levels
 
 `buildRoomsLevel(rooms, seed)` (`dev.ts`, `?rooms=a,b&seed=N` in the game):
 the lab, then each named module (any registered or pending middle module)
-behind a connecting corridor, then a corridor and the exit lock. Each
-module gets random parameters from the seed, or its defaults for
-`name!default`; `name@mirror` mirrors it. Corridors are picked from a
-fixed list (straight, then bends back towards +X, lengths 3-10 m) as the
-first that keeps every footprint apart; if none fits, the assembler's
-overlap error is thrown. Same names and seed, same level.
+behind a connecting corridor, then a corridor and the exit lock (the same
+finish as generated runs). A module that takes another doorway size or has
+an open entry (the authored set pieces: `?rooms=valve-chamber`) gets the
+generator's doorway adapter after its corridor. Each module gets random
+parameters from the seed, or its defaults for `name!default`;
+`name@mirror` mirrors it. Corridors are picked from a fixed list
+(straight, then bends back towards +X, lengths 3-10 m) as the first that
+keeps every footprint apart; if none fits, the assembler's overlap error
+is thrown. Same names and seed, same level.
 
 ## The assembler
 

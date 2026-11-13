@@ -264,8 +264,9 @@ function build(
     sh + 0.25,
     Math.min(sh + 0.75, h - 0.15),
   );
+  // Barely turned: the stored crates stand as little as 0.85 m apart.
   const crates = lay.crates.map((c) =>
-    k.propTurned("crate_wood", c.x, 0, c.z, rng.range(-0.1, 0.1)),
+    k.propTurned("crate_wood", c.x, 0, c.z, rng.range(-0.03, 0.03)),
   );
 
   // --- The main room: loose odds and ends, not enough by themselves --------

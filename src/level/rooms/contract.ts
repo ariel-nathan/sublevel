@@ -66,6 +66,7 @@ const CELL = 0.1;
 interface Case {
   label: string;
   params: unknown;
+  seed: number;
   at: Connector;
   mirror: boolean;
 }
@@ -109,9 +110,12 @@ function cases(module: AnyRoomModule, options: ContractOptions): Case[] {
               width: module.entrySize.width[big ? 1 : 0],
               height: module.entrySize.height[big ? 1 : 0],
             };
+        // A different rng seed per case: turned props, dressing.
+        const seed = (options.seedBase ?? 1) * 7919 + n;
         out.push({
-          label: `${JSON.stringify(params)} facing (${facing.x}, ${facing.z})${mirror ? " mirrored" : ""} ${size.width}x${size.height}`,
+          label: `${JSON.stringify(params)} facing (${facing.x}, ${facing.z})${mirror ? " mirrored" : ""} ${size.width}x${size.height} seed ${seed}`,
           params,
+          seed,
           at: {
             position: ORIGIN,
             facing,
@@ -236,6 +240,7 @@ function caseProblems(module: AnyRoomModule, c: Case): string[] {
     params: c.params,
     mirror: c.mirror,
     prefix: "m.",
+    seed: c.seed,
   });
   // Inside the footprint, doorways on its boundary, roles.
   out.push(...outsideFootprint(plan, parts));

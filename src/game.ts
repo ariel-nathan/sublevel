@@ -133,7 +133,15 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
     renderer.resize(window.innerWidth, window.innerHeight);
   });
 
-  const level = buildLevel();
+  // `?seed=N` plays a generated run; `?rooms=a,b` builds named room modules.
+  const query = new URLSearchParams(location.search);
+  const seedText = query.get("seed");
+  const seed =
+    seedText !== null && seedText !== "" && Number.isFinite(Number(seedText))
+      ? Math.floor(Number(seedText))
+      : undefined;
+  const rooms = query.get("rooms")?.split(",").filter(Boolean);
+  const level = buildLevel({ seed, rooms });
   const identity = mat4.identity();
   const levelItems: DrawItem[] = level.meshes.map((mesh) => ({
     mesh: renderer.createMesh(mesh),
@@ -413,7 +421,9 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
           finished = true;
           const seconds = Math.round(stepCount * FIXED_DT);
           const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-          message = `Escaped in ${clock}  -  press R to restart`;
+          const run =
+            level.data.seed === null ? "" : `  -  seed ${level.data.seed}`;
+          message = `Escaped in ${clock}${run}  -  press R to restart`;
           messageTime = Number.POSITIVE_INFINITY;
           audio.play("objective");
         }

@@ -126,6 +126,11 @@ export class Solver {
       case "throw":
         return this.throwAt(step.prop, step.at);
       case "wait":
+        if (step.for === undefined) {
+          // A plain delay.
+          await this.pilot.wait(Math.round(step.seconds * 60));
+          return null;
+        }
         return this.wait(step.for, step.seconds);
     }
   }

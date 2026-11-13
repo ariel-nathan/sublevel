@@ -9,6 +9,8 @@ import type {
 import { AirGrid } from "./airgrid";
 import { LightBaker } from "./bake";
 import { defineLevel } from "./define";
+import { buildRoomsLevel } from "./dev";
+import { generateLevel } from "./gen";
 import { boxOf, type Box } from "./geometry";
 import { generateMeshes, isSeeThrough } from "./meshgen";
 
@@ -44,9 +46,13 @@ export function levelAir(data: LevelData): AirGrid {
 }
 
 /** Builds the level data, its baked meshes and one collider per brush. */
-export function buildLevel(_options: LevelOptions = {}): BuiltLevel {
-  // Generated runs are not implemented yet: every seed gives the hand-built
-  // level.
+export function buildLevel(options: LevelOptions = {}): BuiltLevel {
+  if (options.rooms && options.rooms.length > 0) {
+    return buildLevelFrom(buildRoomsLevel(options.rooms, options.seed ?? 1));
+  }
+  if (options.seed !== undefined) {
+    return buildLevelFrom(generateLevel(options.seed));
+  }
   return buildLevelFrom(defineLevel());
 }
 

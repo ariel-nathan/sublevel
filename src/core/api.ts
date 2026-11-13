@@ -426,6 +426,11 @@ export interface LevelOptions {
    * Omit it to get the hand-built level.
    */
   seed?: number;
+  /**
+   * Development aid: build the opening room, then these room modules by
+   * name in order, then the finish. Takes precedence over a generated run.
+   */
+  rooms?: readonly string[];
 }
 
 /**
@@ -440,14 +445,24 @@ export type SolutionStep =
   | { do: "walk"; to: Vec3 }
   /** Go to a wall button within reach and press it with the use key. */
   | { do: "press"; button: string }
-  /** Pick up a prop and set it down so that it rests at `to`. */
-  | { do: "carry"; prop: number; to: Vec3 }
+  /**
+   * Pick up a prop and set it down so that it rests at `to`. `from` is
+   * where to stand when letting go (default: worked out from where the step
+   * begins) and `holdY` the height to release it at.
+   */
+  | { do: "carry"; prop: number; to: Vec3; from?: Vec3; holdY?: number }
   /** Push a prop that is too heavy to carry until it rests near `to`. */
   | { do: "push"; prop: number; to: Vec3 }
-  /** Pick up a prop and throw it so that it hits the point `at`. */
-  | { do: "throw"; prop: number; at: Vec3 }
-  /** Wait until a world event of this type happens, at most `seconds`. */
-  | { do: "wait"; for: WorldEvent["type"]; seconds: number };
+  /**
+   * Pick up a prop and throw it so that it hits the point `at`, standing
+   * at `from` (default: where the step begins).
+   */
+  | { do: "throw"; prop: number; at: Vec3; from?: Vec3 }
+  /**
+   * Wait at most `seconds` for a world event of this type, counting any that
+   * happened since the previous step began. Without `for`, simply wait.
+   */
+  | { do: "wait"; for?: WorldEvent["type"]; seconds: number };
 
 export type LightFlicker = "none" | "fluorescent" | "broken";
 

@@ -56,21 +56,48 @@ export function buildLevel(options: LevelOptions = {}): BuiltLevel {
   return buildLevelFrom(defineLevel());
 }
 
+/**
+ * Milliseconds spent in each stage of `buildLevelFrom`, filled in when
+ * asked for: air (reachable-air flood), faces (cutting and culling), bake
+ * (light baking), mesh (the rest of tessellation), colliders.
+ */
+export type BuildTimings = Partial<
+  Record<"air" | "faces" | "bake" | "mesh" | "colliders", number>
+>;
+
 /** Bakes meshes and colliders for level data (from `assembleLevel`). */
-export function buildLevelFrom(data: LevelData): BuiltLevel {
+export function buildLevelFrom(
+  data: LevelData,
+  timings?: BuildTimings,
+): BuiltLevel {
+  let t = performance.now();
+  const lap = (stage: keyof BuildTimings): void => {
+    if (!timings) return;
+    const now = performance.now();
+    timings[stage] = (timings[stage] ?? 0) + now - t;
+    t = now;
+  };
   const boxes = data.brushes.map(boxOf);
   const air = levelAir(data);
+  lap("air");
   const baker = new LightBaker(
     boxes,
     data.lights,
     data.ambient,
     data.brushes.map(isSeeThrough),
   );
-  const meshes = generateMeshes(data.brushes, air, baker);
+  const meshes = generateMeshes(data.brushes, air, baker, timings);
+  if (timings) {
+    // generateMeshes reports faces and bake; the rest is tessellation.
+    const spent = performance.now() - t;
+    timings.mesh = spent - (timings.faces ?? 0) - (timings.bake ?? 0);
+    t = performance.now();
+  }
   const colliders: Aabb[] = data.brushes.map((b) => ({
     min: { ...b.min },
     max: { ...b.max, y: isSkirting(b) ? SKIRTING_COLLIDER_TOP : b.max.y },
   }));
+  lap("colliders");
   return { data, meshes, colliders };
 }
 

@@ -189,6 +189,65 @@ export class BoxIndex {
 }
 
 /**
+ * Uniform grid over boxes for "which boxes might touch this region?":
+ * `forEachNear` calls back once with every box whose closed extent shares a
+ * grid cell with the closed query region (a superset of the boxes touching
+ * it), in no particular order. Callers apply their own exact test.
+ */
+export class BoxGrid {
+  private readonly map = new Map<number, number[]>();
+  private readonly stamp: Uint32Array;
+  private tick = 0;
+
+  constructor(
+    boxes: readonly Box[],
+    private readonly cell = 1,
+  ) {
+    this.stamp = new Uint32Array(boxes.length);
+    boxes.forEach((b, n) => {
+      const c = this.cell;
+      for (let i = Math.floor(b.x0 / c); i <= Math.floor(b.x1 / c); i++) {
+        for (let j = Math.floor(b.y0 / c); j <= Math.floor(b.y1 / c); j++) {
+          for (let k = Math.floor(b.z0 / c); k <= Math.floor(b.z1 / c); k++) {
+            const key = BoxGrid.key(i, j, k);
+            const list = this.map.get(key);
+            if (list) list.push(n);
+            else this.map.set(key, [n]);
+          }
+        }
+      }
+    });
+  }
+
+  private static key(i: number, j: number, k: number): number {
+    return ((i + 2048) * 4096 + (j + 2048)) * 4096 + (k + 2048);
+  }
+
+  /** Every box near the region lo..hi (each once). */
+  forEachNear(
+    lo: readonly number[],
+    hi: readonly number[],
+    fn: (n: number) => void,
+  ): void {
+    const c = this.cell;
+    const t = ++this.tick;
+    for (let i = Math.floor(lo[0] / c); i <= Math.floor(hi[0] / c); i++) {
+      for (let j = Math.floor(lo[1] / c); j <= Math.floor(hi[1] / c); j++) {
+        for (let k = Math.floor(lo[2] / c); k <= Math.floor(hi[2] / c); k++) {
+          const list = this.map.get(BoxGrid.key(i, j, k));
+          if (!list) continue;
+          for (const n of list) {
+            if (this.stamp[n] === t) continue;
+            this.stamp[n] = t;
+            fn(n);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
  * True if the union of the indexed boxes covers the whole region. Exact: the
  * region is cut at every box boundary that crosses it and each piece's centre
  * is tested.

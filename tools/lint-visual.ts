@@ -1,39 +1,45 @@
 /**
- * `bun tools/lint-visual.ts [--only <substring>] [--out <dir>]`
+ * `bun tools/lint-visual.ts [--only <substring>] [--out <dir>] [--self-test]`
  *
  * Automatic visual defect detection from the tour viewpoints, in both door
- * states:
+ * states. Exit code 0 when nothing is flagged, 1 otherwise, 2 on a tool error.
  *
- * - Shimmer / z-fighting: each view is rendered in the flat "material" view,
- *   then again with the camera moved 1 mm and 3 mm along its right vector and
- *   along its forward vector. A pixel whose material colour changes is
- *   "unstable". Unstable pixels explained by ordinary silhouette edge crawl
- *   are discarded; clusters of what remains are reported.
  * - Holes: in the "coverage" view any pure magenta pixel is a place with no
  *   geometry; the level is sealed, so there should be none.
+ * - Z-fighting: each view is rendered in the flat "material" view at the base
+ *   pose and at five poses moved by a few millimetres; pixels whose material
+ *   changes are "unstable". Edge aliasing explains most of them, so the
+ *   "depth" and "normals" views of the base pose are used to discard
+ *   everything within a couple of pixels of a depth edge, a normal edge, a
+ *   stable material boundary or a cut-out surface, and what is left must be a
+ *   solid area (at least 3 pixels thick) to count. See findShimmer in
+ *   lint-core.ts.
+ * - `--self-test` (positive control): injects a quad exactly coplanar with a
+ *   wall but in another material into the running game, requires the check to
+ *   flag it on a view facing that wall, then removes it.
  *
- * Writes annotated images to out/lint/ and exits non-zero if anything is
- * flagged. If the renderer has no diagnostic views (older build), says so
- * and falls back to comparing normal frames with a tolerance (no hole check).
+ * Annotated images go to out/lint/ for flagged view-states only.
  */
 import { join } from "node:path";
-import { launchGame } from "./browser";
+import { launchGame, type GameSession } from "./browser";
 import { parseArgs } from "./cli";
 import type { Image } from "./image";
 import {
   annotate,
   clusterMask,
   countMask,
+  findShimmer,
   looksLikeCoverage,
   looksLikeMaterial,
   magentaMask,
-  removeSilhouetteCrawl,
-  silhouetteMask,
-  unstableMask,
   type Cluster,
+  type Colour3,
 } from "./lint-core";
 import { Pilot } from "./pilot";
 import { writePng } from "./png";
+import { MATERIAL_IDS } from "../src/core/materials";
+import { materialDebugColor } from "../src/render/layout";
+import { SEE_THROUGH_MATERIALS } from "../src/level/meshgen";
 import {
   VIEWS,
   grabFrame,
@@ -46,24 +52,36 @@ import {
   type DoorState,
   type Viewpoint,
 } from "./views";
+import { injectCoplanarQuad, removeInjected } from "./lint-selftest";
 
-/** Smallest cluster (pixels) worth reporting. */
-const MIN_CLUSTER = 4;
-/** In fallback mode (lit frames) only larger clusters count. */
-const FALLBACK_MIN_CLUSTER = 150;
-/** Camera moves in millimetres. */
-const JITTER_MM = [1, 3];
-/** Fallback thresholds on lit frames (per-channel, 0..255). */
-const FALLBACK_UNSTABLE_TOLERANCE = 48;
-const FALLBACK_SILHOUETTE_TOLERANCE = 40;
+/** Camera moves (mm along the right / forward vector; negative = left / back). */
+const JITTERS: readonly { axis: "right" | "forward"; mm: number }[] = [
+  { axis: "right", mm: 1 },
+  { axis: "forward", mm: 1 },
+  { axis: "right", mm: 3 },
+  { axis: "forward", mm: 3 },
+  { axis: "right", mm: -2 },
+];
 
-interface Row {
+/** Debug colours of the alpha cut-out materials (pure edge aliasing). */
+const CUTOUT_COLOURS: Colour3[] = [...SEE_THROUGH_MATERIALS].map((id) =>
+  materialDebugColor(MATERIAL_IDS.indexOf(id)),
+);
+
+export interface ViewResult {
   view: string;
   doors: DoorState;
   shimmerClusters: Cluster[];
   shimmerPixels: number;
+  /** Pixels that changed in any jittered frame, before any rule. */
+  unstablePixels: number;
+  /** Unstable pixels that were explained as edge aliasing. */
+  explainedPixels: number;
   holeClusters: Cluster[];
   holePixels: number;
+  /** Annotation inputs (only kept for flagged views). */
+  flagged: Uint8Array;
+  holes: Uint8Array;
 }
 
 async function save(path: string, image: Image): Promise<void> {
@@ -73,8 +91,140 @@ async function save(path: string, image: Image): Promise<void> {
 const box = (c: Cluster): string =>
   `[${c.minX},${c.minY}..${c.maxX},${c.maxY}] ${c.pixels}px`;
 
+/** Renders and analyses one viewpoint in the game's current state. */
+async function lintView(
+  session: GameSession,
+  view: Viewpoint,
+  doors: DoorState,
+): Promise<ViewResult> {
+  const shot = async (
+    debugView: "material" | "depth" | "normals" | "coverage",
+    offset?: { x: number; y: number; z: number },
+  ): Promise<Image> => {
+    await setPose(session, poseOf(view, offset));
+    await setDebugView(session, debugView);
+    return grabFrame(session);
+  };
+  const base = await shot("material");
+  const jittered: Image[] = [];
+  for (const { axis, mm } of JITTERS) {
+    jittered.push(await shot("material", jitterOffsets(view, mm)[axis]));
+  }
+  const depth = await shot("depth");
+  const normals = await shot("normals");
+  const shimmer = findShimmer({
+    base,
+    jittered,
+    depth,
+    normals,
+    cutouts: CUTOUT_COLOURS,
+  });
+  const coverage = await shot("coverage");
+  const holes = magentaMask(coverage);
+  const holePixels = countMask(holes);
+  await setDebugView(session, "none");
+  const unstablePixels = countMask(shimmer.unstable);
+  return {
+    view: view.name,
+    doors,
+    unstablePixels,
+    explainedPixels: unstablePixels - countMask(shimmer.flagged),
+    shimmerClusters: shimmer.clusters,
+    shimmerPixels: shimmer.clusters.reduce((n, c) => n + c.pixels, 0),
+    holeClusters: clusterMask(holes, base.width, base.height, { gap: 1 }),
+    holePixels,
+    flagged: shimmer.flagged,
+    holes,
+  };
+}
+
+async function writeAnnotations(
+  session: GameSession,
+  view: Viewpoint,
+  result: ViewResult,
+  out: string,
+): Promise<void> {
+  await setPose(session, poseOf(view));
+  await setDebugView(session, "none");
+  const normal = await grabFrame(session);
+  if (result.shimmerClusters.length > 0) {
+    await save(
+      join(out, `${view.name}-${result.doors}-shimmer.png`),
+      annotate(normal, result.flagged, result.shimmerClusters),
+    );
+  }
+  if (result.holePixels > 0) {
+    await save(
+      join(out, `${view.name}-${result.doors}-holes.png`),
+      annotate(normal, result.holes, result.holeClusters, [0, 255, 255]),
+    );
+  }
+}
+
+const isFlagged = (r: ViewResult): boolean =>
+  r.shimmerClusters.length > 0 || r.holePixels > 0;
+
+/**
+ * Positive control. Returns a human-readable line and whether the injected
+ * z-fighting was found (and the clean view was clean).
+ */
+async function selfTest(
+  session: GameSession,
+  out: string,
+): Promise<{ ok: boolean; line: string }> {
+  const view = VIEWS.find((v) => v.name === "lab-spawn") ?? VIEWS[0];
+  const before = await lintView(session, view, "closed");
+  // A quad that is exactly coplanar always wins the depth test (later draw),
+  // and one more than a depth quantum behind loses it; in between, the
+  // winner flips with the camera's sub-millimetre position. Try offsets
+  // across that range; an offset is "fighting" if the raw material view
+  // visibly flips over a large area, and the lint must flag every one.
+  const OFFSETS_MM = [0.01, 0.02, 0.035, 0.05, 0.08];
+  const lines: string[] = [];
+  let fighting = 0;
+  let caught = 0;
+  let wall = "";
+  for (const mm of OFFSETS_MM) {
+    const injected = await injectCoplanarQuad(session, view, mm / 1000);
+    wall = `${injected.material} quad on ${injected.wall} (${injected.plane})`;
+    try {
+      const after = await lintView(session, view, "closed");
+      const extra = after.unstablePixels - before.unstablePixels;
+      const isFighting = extra >= 500;
+      const isCaught = after.shimmerPixels >= 500;
+      if (isFighting) {
+        fighting++;
+        caught += isCaught ? 1 : 0;
+        if (isCaught) {
+          await writeAnnotations(
+            session,
+            view,
+            { ...after, holePixels: 0 },
+            join(out, `selftest-${mm}mm`),
+          );
+        }
+      }
+      lines.push(
+        `${mm} mm behind: +${extra} unstable px, flagged ${after.shimmerPixels}px` +
+          `${isFighting ? (isCaught ? " (fighting, caught)" : " (fighting, MISSED)") : " (not fighting)"}`,
+      );
+    } finally {
+      await removeInjected(session);
+    }
+  }
+  const ok = before.shimmerPixels === 0 && fighting > 0 && caught === fighting;
+  return {
+    ok,
+    line:
+      `self-test on ${view.name}: ${wall}\n  ` +
+      lines.join("\n  ") +
+      `\n  -> ${caught}/${fighting} fighting variants detected, clean view flagged ${before.shimmerPixels}px: ${ok ? "DETECTED" : "NOT DETECTED"}`,
+  };
+}
+
 async function main(): Promise<boolean> {
-  const args = parseArgs(process.argv.slice(2));
+  const started = Date.now();
+  const args = parseArgs(process.argv.slice(2), ["self-test"]);
   const out = args.options.get("out") ?? "out/lint";
   const views = selectViews(VIEWS, args.options.get("only"));
   if (views.length === 0) {
@@ -83,154 +233,93 @@ async function main(): Promise<boolean> {
   const session = await launchGame();
   try {
     const pilot = new Pilot(session, { run: "lint", outDir: "out" });
-    const first = views[0];
 
-    // Are the diagnostic views real in this build?
-    await setPose(session, poseOf(first));
+    // The debug views must be real in this build.
+    await setPose(session, poseOf(views[0]));
     await setDebugView(session, "coverage");
     const coverageProbe = await grabFrame(session);
     await setDebugView(session, "material");
     const materialProbe = await grabFrame(session);
     await setDebugView(session, "none");
-    const diagnostic =
-      looksLikeCoverage(coverageProbe) && looksLikeMaterial(materialProbe);
-    if (!diagnostic) {
-      console.log(
-        "NOTICE: debug views not available in this build (the coverage and\n" +
-          "material views render the normal image). Falling back to comparing\n" +
-          "normal frames with a tolerance; the hole check is skipped. Results are\n" +
-          "approximate: re-run after the renderer's debug views are merged.\n",
+    if (
+      !looksLikeCoverage(coverageProbe) ||
+      !looksLikeMaterial(materialProbe)
+    ) {
+      throw new Error(
+        "the renderer's coverage/material debug views are not available in this build",
       );
     }
 
-    const rows: Row[] = [];
+    let selfTestResult: { ok: boolean; line: string } | null = null;
+    if (args.options.has("self-test")) {
+      selfTestResult = await selfTest(session, out);
+    }
+
+    const rows: ViewResult[] = [];
     const runState = async (doors: DoorState): Promise<void> => {
       for (const view of views) {
-        rows.push(await lintView(view, doors));
+        const result = await lintView(session, view, doors);
+        if (isFlagged(result)) {
+          await writeAnnotations(session, view, result, out);
+        }
+        rows.push(result);
       }
     };
-
-    const lintView = async (
-      view: Viewpoint,
-      doors: DoorState,
-    ): Promise<Row> => {
-      const flat = diagnostic ? "material" : "none";
-      const frame = async (offset?: {
-        x: number;
-        y: number;
-        z: number;
-      }): Promise<Image> => {
-        await setPose(session, poseOf(view, offset));
-        await setDebugView(session, flat);
-        return grabFrame(session);
-      };
-      const base = await frame();
-      const jittered: Image[] = [];
-      for (const mm of JITTER_MM) {
-        const { right, forward } = jitterOffsets(view, mm);
-        jittered.push(await frame(right));
-        jittered.push(await frame(forward));
-      }
-      const tolerance = diagnostic ? 0 : FALLBACK_UNSTABLE_TOLERANCE;
-      const unstable = unstableMask(base, jittered, tolerance);
-      const silhouette = silhouetteMask(
-        base,
-        diagnostic ? 0 : FALLBACK_SILHOUETTE_TOLERANCE,
-      );
-      const remaining = removeSilhouetteCrawl(
-        unstable,
-        silhouette,
-        base.width,
-        base.height,
-      );
-      const shimmerClusters = clusterMask(remaining, base.width, base.height, {
-        minSize: diagnostic ? MIN_CLUSTER : FALLBACK_MIN_CLUSTER,
-        gap: 1,
-      });
-      const shimmerPixels = shimmerClusters.reduce((n, c) => n + c.pixels, 0);
-
-      let holeClusters: Cluster[] = [];
-      let holePixels = 0;
-      let holes: Uint8Array = new Uint8Array(base.width * base.height);
-      if (diagnostic) {
-        await setPose(session, poseOf(view));
-        await setDebugView(session, "coverage");
-        const coverage = await grabFrame(session);
-        holes = magentaMask(coverage);
-        holePixels = countMask(holes);
-        holeClusters = clusterMask(holes, base.width, base.height, { gap: 1 });
-      }
-
-      const tag = `${view.name}@${doors}`;
-      if (shimmerClusters.length > 0 || holePixels > 0) {
-        await setPose(session, poseOf(view));
-        await setDebugView(session, "none");
-        const normal = await grabFrame(session);
-        if (shimmerClusters.length > 0) {
-          const mask = new Uint8Array(remaining);
-          await save(
-            join(out, `${view.name}-${doors}-shimmer.png`),
-            annotate(normal, mask, shimmerClusters),
-          );
-        }
-        if (holePixels > 0) {
-          await save(
-            join(out, `${view.name}-${doors}-holes.png`),
-            annotate(normal, holes, holeClusters, [0, 255, 255]),
-          );
-        }
-      }
-      await setDebugView(session, "none");
-      void tag;
-      return {
-        view: view.name,
-        doors,
-        shimmerClusters,
-        shimmerPixels,
-        holeClusters,
-        holePixels,
-      };
-    };
-
     await runState("closed");
     await openDoors(pilot);
     await runState("open");
 
-    // Summary.
-    const w = Math.max(...rows.map((r) => r.view.length), 4);
-    console.log(`${"view".padEnd(w)}  doors   shimmer clusters  px   hole px`);
-    for (const r of rows) {
-      const flagged = r.shimmerClusters.length > 0 || r.holePixels > 0;
+    // Summary: one line per view, both door states side by side.
+    const w = Math.max(...views.map((v) => v.name.length), 4);
+    const cell = (r: ViewResult | undefined): string => {
+      if (!r) {
+        return "-";
+      }
+      return isFlagged(r)
+        ? `FLAG shimmer ${r.shimmerPixels}px holes ${r.holePixels}px`
+        : `ok (${r.explainedPixels} edge px)`;
+    };
+    console.log(`${"view".padEnd(w)}  ${"closed".padEnd(26)}  open`);
+    for (const view of views) {
+      const closed = rows.find(
+        (r) => r.view === view.name && r.doors === "closed",
+      );
+      const open = rows.find((r) => r.view === view.name && r.doors === "open");
       console.log(
-        `${r.view.padEnd(w)}  ${r.doors.padEnd(6)}  ${String(r.shimmerClusters.length).padStart(8)}  ${String(r.shimmerPixels).padStart(6)}  ${String(r.holePixels).padStart(6)}${flagged ? "   <-- FLAGGED" : ""}`,
+        `${view.name.padEnd(w)}  ${cell(closed).padEnd(26)}  ${cell(open)}`,
       );
     }
-    const flagged = rows.filter(
-      (r) => r.shimmerClusters.length > 0 || r.holePixels > 0,
-    );
-    if (flagged.length > 0) {
-      console.log(
-        "\nDetails (bounding boxes in frame pixels, x,y from the top-left):",
-      );
-      for (const r of flagged) {
-        if (r.shimmerClusters.length > 0) {
-          console.log(
-            `  ${r.view} (${r.doors}) shimmer: ${r.shimmerClusters.slice(0, 6).map(box).join("; ")}${r.shimmerClusters.length > 6 ? "; ..." : ""}`,
-          );
-        }
-        if (r.holePixels > 0) {
-          console.log(
-            `  ${r.view} (${r.doors}) holes: ${r.holeClusters.slice(0, 6).map(box).join("; ")}`,
-          );
-        }
+
+    const flagged = rows.filter(isFlagged);
+    for (const r of flagged) {
+      if (r.shimmerClusters.length > 0) {
+        console.log(
+          `  ${r.view} (${r.doors}) shimmer: ${r.shimmerClusters.slice(0, 6).map(box).join("; ")}`,
+        );
+      }
+      if (r.holePixels > 0) {
+        console.log(
+          `  ${r.view} (${r.doors}) holes: ${r.holeClusters.slice(0, 6).map(box).join("; ")}`,
+        );
       }
     }
+    const holeStates = rows.filter((r) => r.holePixels > 0).length;
+    const shimmerStates = rows.filter(
+      (r) => r.shimmerClusters.length > 0,
+    ).length;
+    if (selfTestResult) {
+      console.log(`\n${selfTestResult.line}`);
+    }
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    const passed = flagged.length === 0 && (selfTestResult?.ok ?? true);
     console.log(
-      `\n${flagged.length === 0 ? "PASS" : "FAIL"}: ${rows.length} view-states checked, ${flagged.length} flagged.` +
-        `${diagnostic ? "" : " (fallback mode: approximate, no hole check)"}` +
-        `${flagged.length > 0 ? ` Annotated images in ${out}/` : ""}`,
+      `\n${passed ? "PASS" : "FAIL"}: ${rows.length} view-states checked: ` +
+        `${holeStates} with holes, ${shimmerStates} with shimmer` +
+        `${selfTestResult ? `, self-test ${selfTestResult.ok ? "ok" : "FAILED"}` : ""} ` +
+        `(${seconds} s)` +
+        `${flagged.length > 0 ? `. Annotated images in ${out}/` : ""}`,
     );
-    return flagged.length === 0;
+    return passed;
   } finally {
     await session.close();
   }

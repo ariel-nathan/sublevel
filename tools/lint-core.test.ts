@@ -7,9 +7,17 @@ import {
   looksLikeCoverage,
   looksLikeMaterial,
   magentaMask,
-  removeSilhouetteCrawl,
-  silhouetteMask,
   unstableMask,
+  andNotMask,
+  closeMask,
+  colourMask,
+  dilateMask,
+  discontinuityMask,
+  erodeMask,
+  findShimmer,
+  openMask,
+  stableBoundaryMask,
+  stablePixels,
 } from "./lint-core";
 import { createImage, fillRect, type Image, type Rgb } from "./image";
 
@@ -55,59 +63,6 @@ describe("unstableMask", () => {
     expect(() =>
       unstableMask(createImage(4, 4), [createImage(5, 4)]),
     ).toThrow();
-  });
-});
-
-describe("silhouetteMask", () => {
-  test("marks both sides of a straight edge, nothing inside flat areas", () => {
-    const image = split(10, 6, 5, RED, GREEN);
-    const mask = silhouetteMask(image);
-    for (let y = 0; y < 6; y++) {
-      expect(mask[y * 10 + 4]).toBe(1);
-      expect(mask[y * 10 + 5]).toBe(1);
-      expect(mask[y * 10 + 2]).toBe(0);
-      expect(mask[y * 10 + 8]).toBe(0);
-    }
-  });
-});
-
-describe("removeSilhouetteCrawl", () => {
-  test("drops a one-pixel edge crawl but keeps interior instability", () => {
-    const width = 20;
-    const height = 12;
-    const base = split(width, height, 10, RED, GREEN);
-    const silhouette = silhouetteMask(base);
-    // The edge moved by one pixel: column 10 now shows the other material.
-    const unstable = new Uint8Array(width * height);
-    for (let y = 0; y < height; y++) {
-      unstable[y * width + 10] = 1;
-    }
-    // A blob in the middle of the red area, away from any edge.
-    for (let y = 3; y < 7; y++) {
-      for (let x = 2; x < 6; x++) {
-        unstable[y * width + x] = 1;
-      }
-    }
-    const kept = removeSilhouetteCrawl(unstable, silhouette, width, height);
-    for (let y = 0; y < height; y++) {
-      expect(kept[y * width + 10]).toBe(0);
-    }
-    expect(countMask(kept)).toBe(16);
-  });
-
-  test("keeps a dense unstable patch even when it straddles a material edge", () => {
-    const width = 20;
-    const height = 12;
-    const base = split(width, height, 10, RED, GREEN);
-    const silhouette = silhouetteMask(base);
-    const unstable = new Uint8Array(width * height);
-    for (let y = 3; y < 8; y++) {
-      for (let x = 7; x < 14; x++) {
-        unstable[y * width + x] = 1;
-      }
-    }
-    const kept = removeSilhouetteCrawl(unstable, silhouette, width, height);
-    expect(countMask(kept)).toBe(countMask(unstable));
   });
 });
 
@@ -203,5 +158,242 @@ describe("annotate", () => {
       Array.from(out.rgba.slice((5 * 12 + 5) * 4, (5 * 12 + 5) * 4 + 3)),
     ).toEqual([255, 0, 0]);
     expect(Array.from(base.rgba.slice(0, 3))).toEqual([10, 20, 30]);
+  });
+});
+
+function maskOf(width: number, height: number, rects: number[][]): Uint8Array {
+  const mask = new Uint8Array(width * height);
+  for (const [x, y, w, h] of rects) {
+    for (let yy = y; yy < y + h; yy++) {
+      for (let xx = x; xx < x + w; xx++) {
+        mask[yy * width + xx] = 1;
+      }
+    }
+  }
+  return mask;
+}
+
+describe("morphology", () => {
+  test("dilate and erode are box operations", () => {
+    const mask = maskOf(9, 9, [[4, 4, 1, 1]]);
+    expect(countMask(dilateMask(mask, 9, 9, 1))).toBe(9);
+    expect(countMask(dilateMask(mask, 9, 9, 2))).toBe(25);
+    const block = maskOf(9, 9, [[2, 2, 5, 5]]);
+    expect(countMask(erodeMask(block, 9, 9, 1))).toBe(9);
+    expect(countMask(erodeMask(block, 9, 9, 3))).toBe(0);
+  });
+
+  test("opening removes lines up to 2 px thick but keeps a 3 px block", () => {
+    const mask = maskOf(30, 20, [
+      [2, 2, 25, 1],
+      [2, 6, 25, 2],
+      [2, 10, 6, 6],
+    ]);
+    const opened = openMask(mask, 30, 20, 1);
+    expect(countMask(opened.slice(0, 30 * 9))).toBe(0);
+    expect(countMask(opened)).toBe(36);
+  });
+
+  test("closing fills one-pixel gaps and does not erode at the border", () => {
+    const mask = maskOf(10, 10, [
+      [0, 0, 4, 10],
+      [5, 0, 5, 10],
+    ]);
+    expect(countMask(closeMask(mask, 10, 10, 1))).toBe(100);
+  });
+});
+
+describe("edge rules", () => {
+  test("discontinuityMask: a step is an edge, a smooth ramp is not (curvature)", () => {
+    const ramp = createImage(20, 4);
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 20; x++) {
+        const i = (y * 20 + x) * 4;
+        ramp.rgba[i] = ramp.rgba[i + 1] = ramp.rgba[i + 2] = 100 + 3 * x;
+      }
+    }
+    expect(countMask(discontinuityMask(ramp, 2, true))).toBe(0);
+    expect(countMask(discontinuityMask(ramp, 2, false))).toBe(80);
+    const step = split(20, 4, 10, [100, 100, 100], [160, 160, 160]);
+    const edge = discontinuityMask(step, 2, true);
+    expect(edge[1 * 20 + 9]).toBe(1);
+    expect(edge[1 * 20 + 10]).toBe(1);
+    expect(edge[1 * 20 + 3]).toBe(0);
+  });
+
+  test("stable boundaries ignore pixels that move", () => {
+    const base = split(10, 4, 5, RED, GREEN);
+    const moved = split(10, 4, 4, RED, GREEN);
+    const stable = stablePixels([base, moved]);
+    expect(stable[0 * 10 + 4]).toBe(0);
+    expect(countMask(stableBoundaryMask(base, stable))).toBe(0);
+    const still = stablePixels([base, split(10, 4, 5, RED, GREEN)]);
+    expect(countMask(stableBoundaryMask(base, still))).toBe(8);
+  });
+
+  test("colourMask finds a colour in any frame", () => {
+    const a = createImage(4, 4, RED);
+    const b = createImage(4, 4, RED);
+    fillRect(b, 1, 1, 2, 2, BLUE);
+    expect(countMask(colourMask([a, b], [BLUE]))).toBe(4);
+    expect(countMask(colourMask([a], [BLUE]))).toBe(0);
+  });
+});
+
+describe("findShimmer", () => {
+  const W = 48;
+  const H = 32;
+  /** Depth grey ramp (smooth), optionally with a step at column `edge`. */
+  function depthImage(edge?: number): Image {
+    const image = createImage(W, H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const v =
+          120 + Math.floor(x / 8) + (edge !== undefined && x >= edge ? 60 : 0);
+        const i = (y * W + x) * 4;
+        image.rgba[i] = image.rgba[i + 1] = image.rgba[i + 2] = v;
+      }
+    }
+    return image;
+  }
+  const flatNormals = (): Image => createImage(W, H, [128, 255, 128]);
+  /** Deterministic pseudo-random bit. */
+  const noise = (x: number, y: number, frame: number): boolean => {
+    let h = (x * 374761393 + y * 668265263 + frame * 2147483647) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+    return ((h ^ (h >>> 16)) & 1) === 1;
+  };
+  const run = (
+    base: Image,
+    jittered: Image[],
+    depth = depthImage(),
+    normals = flatNormals(),
+    cutouts: readonly (readonly [number, number, number])[] = [],
+  ) => findShimmer({ base, jittered, depth, normals, cutouts });
+
+  test("a 1 px silhouette crawl on a depth edge is ignored", () => {
+    const base = split(W, H, 24, RED, GREEN);
+    const jittered = [23, 25, 23, 24, 25].map((e) =>
+      split(W, H, e, RED, GREEN),
+    );
+    const result = run(base, jittered, depthImage(24));
+    expect(countMask(result.unstable)).toBeGreaterThan(0);
+    expect(result.clusters).toHaveLength(0);
+  });
+
+  test("a crawl that moves up to 2 px is still ignored", () => {
+    const base = split(W, H, 24, RED, GREEN);
+    const jittered = [22, 26, 22, 24, 26].map((e) =>
+      split(W, H, e, RED, GREEN),
+    );
+    expect(run(base, jittered, depthImage(24)).clusters).toHaveLength(0);
+  });
+
+  test("a thin line between same-material neighbours, no edge anywhere, is ignored", () => {
+    const base = createImage(W, H, RED);
+    const jittered = [0, 1, 2, 3, 4].map((f) => {
+      const image = createImage(W, H, RED);
+      fillRect(image, 0, 15, W, f % 2 === 0 ? 2 : 1, GREEN);
+      return image;
+    });
+    expect(run(base, jittered).clusters).toHaveLength(0);
+  });
+
+  test("an interior noisy block with smooth depth and constant normals is flagged", () => {
+    const base = createImage(W, H, RED);
+    const jittered = [0, 1, 2, 3, 4].map((frame) => {
+      const image = createImage(W, H, RED);
+      for (let y = 8; y < 24; y++) {
+        for (let x = 12; x < 32; x++) {
+          if (noise(x, y, frame)) {
+            fillRect(image, x, y, 1, 1, GREEN);
+          }
+        }
+      }
+      return image;
+    });
+    const result = run(base, jittered);
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].pixels).toBeGreaterThan(200);
+    expect(result.clusters[0].minX).toBeGreaterThanOrEqual(12);
+    expect(result.clusters[0].maxX).toBeLessThanOrEqual(31);
+  });
+
+  test("a solid flipping block is flagged", () => {
+    const base = createImage(W, H, RED);
+    const flipped = createImage(W, H, RED);
+    fillRect(flipped, 10, 8, 20, 12, GREEN);
+    const result = run(base, [flipped, base, flipped, base, flipped]);
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].pixels).toBe(240);
+  });
+
+  test("a block next to, but not on, an edge is flagged", () => {
+    const base = split(W, H, 6, BLUE, RED);
+    const flipped = split(W, H, 6, BLUE, RED);
+    fillRect(flipped, 14, 8, 20, 12, GREEN);
+    const result = run(
+      base,
+      [flipped, base, flipped, base, flipped],
+      depthImage(6),
+    );
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].pixels).toBeGreaterThan(200);
+  });
+
+  test("a block overlapping the edge zone is flagged outside of it", () => {
+    const base = split(W, H, 6, BLUE, RED);
+    const flipped = split(W, H, 6, BLUE, RED);
+    fillRect(flipped, 4, 8, 26, 12, GREEN);
+    const result = run(
+      base,
+      [flipped, base, flipped, base, flipped],
+      depthImage(6),
+    );
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].minX).toBeGreaterThanOrEqual(9);
+    expect(result.clusters[0].maxX).toBe(29);
+  });
+
+  test("a normals step alone explains a crawl (no depth step)", () => {
+    const base = split(W, H, 24, RED, GREEN);
+    const jittered = [23, 25, 23, 24, 25].map((e) =>
+      split(W, H, e, RED, GREEN),
+    );
+    const normals = split(W, H, 24, [128, 255, 128], [255, 128, 128]);
+    expect(run(base, jittered, depthImage(), normals).clusters).toHaveLength(0);
+  });
+
+  test("a cut-out lattice is ignored even when its cells are thick", () => {
+    const GRATE = [0, 160, 255] as const;
+    const make = (shift: number): Image => {
+      const image = createImage(W, H, RED);
+      // 4x4 px bars of grate, with the background showing between them.
+      for (let y = 4; y < 28; y++) {
+        for (let x = 4; x < 44; x++) {
+          const bar =
+            (Math.floor((x + shift) / 4) + Math.floor(y / 4)) % 2 === 0;
+          fillRect(image, x, y, 1, 1, bar ? GRATE : GREEN);
+        }
+      }
+      return image;
+    };
+    const base = make(0);
+    const jittered = [1, 2, 4, 3, 1].map(make);
+    expect(
+      run(base, jittered, depthImage(), flatNormals(), []).clusters.length,
+    ).toBeGreaterThan(0);
+    expect(
+      run(base, jittered, depthImage(), flatNormals(), [GRATE]).clusters,
+    ).toHaveLength(0);
+  });
+
+  test("results are masks of the right size and flagged is a subset of unstable", () => {
+    const base = createImage(W, H, RED);
+    const flipped = createImage(W, H, RED);
+    fillRect(flipped, 10, 8, 20, 12, GREEN);
+    const result = run(base, [flipped]);
+    expect(result.flagged).toHaveLength(W * H);
+    expect(countMask(andNotMask(result.flagged, result.unstable))).toBe(0);
   });
 });

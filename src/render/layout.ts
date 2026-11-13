@@ -4,7 +4,14 @@
  * covered by layout.test.ts; the layouts must match scene.wgsl / post.wgsl.
  */
 import type { Mat4, Vec3 } from "../math";
-import type { Camera, Color, DebugView, Fog, PointLight } from "../core/api";
+import type {
+  Aabb,
+  Camera,
+  Color,
+  DebugView,
+  Fog,
+  PointLight,
+} from "../core/api";
 import { MATERIAL_IDS } from "../core/materials";
 import type { MeshData } from "../core/mesh";
 
@@ -329,9 +336,54 @@ export function packItem(
 // Light selection
 // ---------------------------------------------------------------------------
 
+/** Width in metres of the fade inside each face of a light's bounds box. */
+export const LIGHT_BOUNDS_FADE = 0.25;
+
+/** Half-extent used to encode "no bounds"; finite so it is safe in uniforms. */
+export const UNBOUNDED_EXTENT = 1e30;
+
+function smoothstep01(x: number): number {
+  const t = Math.min(1, Math.max(0, x));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * CPU reference of the shader's bounds factor: 1 deep inside the box, 0 on
+ * and outside its faces, a product of per-axis smoothsteps over the last
+ * `fade` metres inside each face. Without bounds it is always 1.
+ */
+export function lightBoundsFade(
+  bounds: Aabb | undefined,
+  x: number,
+  y: number,
+  z: number,
+  fade: number = LIGHT_BOUNDS_FADE,
+): number {
+  if (!bounds) {
+    return 1;
+  }
+  const axis = (v: number, lo: number, hi: number): number =>
+    Math.min(smoothstep01((v - lo) / fade), smoothstep01((hi - v) / fade));
+  return (
+    axis(x, bounds.min.x, bounds.max.x) *
+    axis(y, bounds.min.y, bounds.max.y) *
+    axis(z, bounds.min.z, bounds.max.z)
+  );
+}
+
+/** Distance from a point to a box (0 inside it). */
+export function distanceToBox(box: Aabb, p: Vec3): number {
+  const dx = Math.max(box.min.x - p.x, 0, p.x - box.max.x);
+  const dy = Math.max(box.min.y - p.y, 0, p.y - box.max.y);
+  const dz = Math.max(box.min.z - p.z, 0, p.z - box.max.z);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 /**
  * How much a light is likely to matter on screen: its brightness, reduced
- * the further the camera is outside its radius.
+ * the further the camera is outside its radius. A light confined to a box
+ * that does not contain the camera counts as that much further away, by the
+ * camera's distance to the box.
  */
 export function lightRelevance(light: PointLight, eye: Vec3): number {
   const brightness =
@@ -342,10 +394,9 @@ export function lightRelevance(light: PointLight, eye: Vec3): number {
   const dx = light.position.x - eye.x;
   const dy = light.position.y - eye.y;
   const dz = light.position.z - eye.z;
-  const gap = Math.max(
-    0,
-    Math.sqrt(dx * dx + dy * dy + dz * dz) - light.radius,
-  );
+  const boxGap = light.bounds ? distanceToBox(light.bounds, eye) : 0;
+  const gap =
+    Math.max(0, Math.sqrt(dx * dx + dy * dy + dz * dz) - light.radius) + boxGap;
   const t = 1 + gap / light.radius;
   return brightness / (t * t);
 }
@@ -384,12 +435,14 @@ export function selectLights(
 //   28 fogParams  vec4f  (x = fog far, y = time)
 //   32 counts     vec4u  (x = light count, y = debug view id)
 //   36 lights     array<Light, MAX_LIGHTS>, Light = posRadius vec4f,
-//                 colorBaked vec4f (rgb = color * intensity, w = baked)
+//                 colorBaked vec4f (rgb = color * intensity, w = baked),
+//                 boundsMin vec4f (xyz, w = 1 if the light has bounds),
+//                 boundsMax vec4f (xyz; +-UNBOUNDED_EXTENT without bounds)
 //   then palette  array<vec4f, MAX_PALETTE> (rgb = material debug colour 0..1)
 // ---------------------------------------------------------------------------
 
 export const FRAME_LIGHTS_OFFSET = 36;
-export const LIGHT_FLOATS = 8;
+export const LIGHT_FLOATS = 16;
 export const FRAME_PALETTE_OFFSET =
   FRAME_LIGHTS_OFFSET + MAX_LIGHTS * LIGHT_FLOATS;
 export const FRAME_FLOATS = FRAME_PALETTE_OFFSET + MAX_PALETTE * 4;
@@ -441,6 +494,14 @@ export function packFrameUniforms(
     out[o + 5] = light.color.y * light.intensity;
     out[o + 6] = light.color.z * light.intensity;
     out[o + 7] = light.baked ? 1 : 0;
+    const b = light.bounds;
+    out[o + 8] = b ? b.min.x : -UNBOUNDED_EXTENT;
+    out[o + 9] = b ? b.min.y : -UNBOUNDED_EXTENT;
+    out[o + 10] = b ? b.min.z : -UNBOUNDED_EXTENT;
+    out[o + 11] = b ? 1 : 0;
+    out[o + 12] = b ? b.max.x : UNBOUNDED_EXTENT;
+    out[o + 13] = b ? b.max.y : UNBOUNDED_EXTENT;
+    out[o + 14] = b ? b.max.z : UNBOUNDED_EXTENT;
   }
   for (let i = 0; i < MATERIAL_IDS.length && i < MAX_PALETTE; i++) {
     const [r, g, b] = materialDebugColor(i);

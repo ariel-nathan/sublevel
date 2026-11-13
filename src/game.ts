@@ -313,6 +313,7 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
         radius: light.radius,
         intensity: light.intensity * flicker(light, index, time),
         baked: light.flicker === "none",
+        bounds: light.bounds,
       }));
       renderer.render({
         camera,

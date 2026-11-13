@@ -17,14 +17,18 @@ import { writePng } from "../../tools/png";
 import {
   BANDS,
   describe,
+  eventSpectrum,
+  kLoudnessDb,
   loopEnvelopeStats,
   powerSpectrum,
   seamDiscontinuity,
   spectralPeaks,
+  tonalPeak,
 } from "./analysis";
 import { stft } from "./fft";
-import { renderSound } from "./index";
-import { CATEGORY_OF } from "./mix";
+import { renderSound, renderVariant } from "./index";
+import { CANDIDATE_NAMES, CATEGORY_OF, FAMILIES, FAMILY_SOUNDS } from "./mix";
+import { VARIANTS } from "./recipes";
 
 const args = process.argv.slice(2);
 const rateIndex = args.indexOf("--rate");
@@ -271,9 +275,110 @@ function drawSound(
   return c;
 }
 
-// --- Main ------------------------------------------------------------------------
+// --- Candidates (listening round 1) -------------------------------------------------
 
 const fmt = (v: number, d = 0) => v.toFixed(d).padStart(6);
+
+/**
+ * `--candidates`: every design of every family side by side, into
+ * out/audio/cand/: one PNG + WAV per sound and design, an 8-step walk at the
+ * game's running cadence per surface, a 5-hit "barrel roll" for metal, a
+ * contact sheet, and a descriptor table including the tonal-peak measure
+ * over all takes.
+ */
+async function previewCandidates(): Promise<void> {
+  mkdirSync("out/audio/cand", { recursive: true });
+  console.log(
+    "family        cand    sound              dur   d40  att  centOn  centTl  flat  tonal@Hz        rms50  kLoud  peak   ms",
+  );
+  const thumbs: { id: string; canvas: Canvas; seconds: number }[] = [];
+  for (const family of FAMILIES) {
+    for (const cand of CANDIDATE_NAMES) {
+      for (const sound of FAMILY_SOUNDS[family]) {
+        const t0 = performance.now();
+        const buf = renderVariant(sound, SR, 0, cand);
+        const ms = performance.now() - t0;
+        const takes = [buf];
+        for (let v = 1; v < VARIANTS[sound]; v++)
+          takes.push(renderVariant(sound, SR, v, cand));
+        const d = describe(buf, SR);
+        const tp = tonalPeak(eventSpectrum(takes), SR);
+        console.log(
+          `${family.padEnd(13)} ${cand.padEnd(7)} ${sound.padEnd(18)}${fmt(d.duration, 2)}${fmt(d.decay40Ms)}${fmt(d.attackMs)}  ${fmt(d.centroidOnset)}  ${fmt(d.centroidTail)}${fmt(d.flatness, 2)}  ${fmt(tp.db, 1)}@${String(Math.round(tp.freq)).padEnd(6)}` +
+            `${fmt(d.rms50Db, 1)}${fmt(kLoudnessDb(buf, SR), 1)}${fmt(d.peakDb, 1)}${fmt(ms, 1)}`,
+        );
+        const id = `${sound}_${cand}`;
+        await Bun.write(`out/audio/cand/${id}.wav`, wav(buf, SR));
+        const width = Math.min(
+          1600,
+          Math.max(400, Math.round(d.duration * 800)),
+        );
+        const big = drawSound(buf, SR, width, 100, 360, false);
+        await writePng(
+          `out/audio/cand/${id}.png`,
+          big.width,
+          big.height,
+          big.rgba,
+        );
+        thumbs.push({
+          id,
+          canvas: drawSound(buf, SR, 360, 50, 150, false),
+          seconds: d.duration,
+        });
+        if (sound.startsWith("footstep")) {
+          // 8 steps at the game's running cadence, cycling takes, game pitch.
+          const period = 0.39;
+          const walk = new Float32Array(Math.round(SR * (period * 8 + 0.4)));
+          for (let s = 0; s < 8; s++) {
+            const take = takes[[0, 2, 1, 3, 1, 0, 3, 2][s]! % takes.length]!;
+            const pitch = 0.96 + ((s * 0.37) % 1) * 0.08;
+            const start = Math.round(s * period * SR);
+            for (let i = 0; start + i < walk.length; i++) {
+              const x = i * pitch;
+              const k = Math.floor(x);
+              if (k + 1 >= take.length) break;
+              const v = take[k]! + (take[k + 1]! - take[k]!) * (x - k);
+              walk[start + i] = walk[start + i]! + 0.5 * v;
+            }
+          }
+          const w = drawSound(walk, SR, 1400, 80, 300, false);
+          await writePng(
+            `out/audio/cand/walk_${id}.png`,
+            w.width,
+            w.height,
+            w.rgba,
+          );
+          await Bun.write(`out/audio/cand/walk_${id}.wav`, wav(walk, SR));
+        }
+      }
+    }
+  }
+  const COLS = 4;
+  const cellW = 370;
+  const cellH = 50 + 150 + 8 + 20;
+  const rows = Math.ceil(thumbs.length / COLS);
+  const sheet = new Canvas(COLS * cellW, rows * cellH);
+  thumbs.forEach(({ id, canvas, seconds }, i) => {
+    const x = (i % COLS) * cellW;
+    const y = Math.floor(i / COLS) * cellH;
+    text(sheet, x + 2, y + 3, `${id} ${seconds.toFixed(2)}s`);
+    sheet.blit(canvas, x, y + 18);
+  });
+  await writePng(
+    "out/audio/cand/sheet.png",
+    sheet.width,
+    sheet.height,
+    sheet.rgba,
+  );
+}
+
+if (args.includes("--candidates")) {
+  await previewCandidates();
+  process.exit(0);
+}
+
+// --- Main ------------------------------------------------------------------------
+
 const header =
   "sound              cat     dur  peak  rms  rms50 crest  att  d20  d40" +
   "  centOn  rollOn  centTl  rollTl  flat  " +

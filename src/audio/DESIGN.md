@@ -145,6 +145,156 @@ swell once per repeat **[I]**. Tests require loop-rate modulation below
   break (2) > debris (1). Debris can never steal a footstep, a door or a
   button; the player's sounds steal debris first. Loops are not voices.
 
+## Listening round 1
+
+A person listened in `demos/audio.html` for the first time. The complete
+feedback was: "walking really bad", "impact metal bad", "crate break bad".
+Nothing else was criticised. Below is what most plausibly causes each
+complaint, ranked, checked against the code and the spectrograms
+(`bun src/audio/preview.ts`), and the three alternatives built for each
+family. Everything in this section is **[I]** unless tagged.
+
+New measuring tools (`analysis.ts`), used throughout:
+
+- `tonalPeak(eventSpectrum(takes))`: how far the most prominent narrow peak
+  stands above its 2/3-octave neighbourhood, over the spectra of all takes
+  of a sound. What repeats from take to take is what becomes "the pitch" of
+  a sound heard every 0.39 s. Shaped noise reads 4–7 dB; a ringing mode
+  reads 15–30 dB.
+- `kLoudnessDb`: loudest 50 ms RMS after an approximate K-weighting (the
+  BS.1770 pre-filter), to compare dull and bright sounds fairly.
+
+### Diagnosis
+
+**Footsteps** ("really bad"):
+
+1. **A pitch that repeats twice a second.** Every surface was built from
+   resonating sine modes: sole modes at 160–2100 Hz, tile modes at
+   1.8–5.9 kHz, and on the grate ten modes ringing for 312 ms (flatness
+   0.00). Takes only moved those modes by ±1 %, so every step had the same
+   pitch. The game then varies pitch by ±4 % at random, which turns the
+   repeated pitch into a wandering tune. Tonal peak: tile 19 dB, grate
+   28 dB, concrete 8.6 dB. Real steps on hard floors are short band-limited
+   noise with almost no pitch.
+2. **Hard clicks, twice.** Contact pulses of 0.2–1.6 ms and noise bursts
+   with 0.2 ms attacks give attacks under 1 ms. The heel and the ball of the
+   foot were two separate hard strikes 34–58 ms apart, so each step was a
+   "click-click". The "weight" was a pure 95–130 Hz sine, which reads as a
+   bloop.
+3. **Too loud, and distorted by the limiter.** Footsteps sat at −13 dB
+   (rms50), 3 dB under impacts, for a sound that plays 2.6 times a second.
+   At that level the raw heel transient peaks 2–4 dB above full scale, so
+   the soft limiter (knee at −7.4 dBFS) flattened every heel by 5–7 dB: a
+   waveshaped, crunchy click on every step. Measured by re-rendering without
+   the limiter.
+4. **Ticking grit.** The concrete grit was sparse single-sample impulses at
+   2600 per second: ticks rather than grain.
+
+**Metal impact** ("bad"):
+
+1. **It is a bell.** 19 clean, exponentially decaying sines at fixed
+   frequencies with d = 220 ring to −40 dB in 935 ms. Tonal peak 28.6 dB.
+   The deliberate near-degenerate pairs add the shimmer of a chime. The
+   metal prop is a 60 kg steel case (`crate_metal`) on concrete: the floor
+   damps it, and most of the energy is gone in 0.2–0.35 s.
+2. **Too few, too tidy partials.** A real struck case has hundreds of
+   crowded, irregular modes whose highs die much faster than the lows. 19
+   modes read as an instrument.
+3. **A thin hit.** The contact transient was a 3 ms high-passed (2.5 kHz)
+   noise tick over a pure 120→85 Hz sine thump. The three micro-collisions
+   inside 15 ms merge into the attack instead of reading as rattle.
+4. The 1 s room reverb (send 0.24) stretches the ring further.
+
+**Crate break** ("bad"):
+
+1. **A xylophone at the end.** The 12 falling planks used the exact
+   free-free bar mode ratios 1 : 2.76 : 5.4 : 8.93, which are the ratios of
+   xylophone and marimba bars. Late pieces were isolated pitched "plinks";
+   tonal peak 15.7 dB, visible as horizontal lines in the spectrogram.
+2. **Static, not splinters.** The fracture was a dense 1.2–9.5 kHz
+   white-noise wash plus 5000 clicks per second for 0.45 s. It reads as
+   hiss or an explosion rather than wood tearing.
+3. **Boom.** A 120→70 Hz sine thump and crate modes at 112–341 Hz put 42 %
+   of the energy in 80–250 Hz. It was also the loudest one-shot (−9 dB),
+   with peaks limited by about 2.5 dB.
+
+**Things that affect all three:**
+
+- **The era resampler distorted at 48 kHz** (most browsers on Windows run at
+  48 kHz). It decimated by taking the nearest sample. At a non-integer ratio
+  that jitters timing by up to half a sample, adding inharmonic noise: a
+  500 Hz sine came out with a −36 dB residual (−58 dB when interpolated), a
+  2 kHz sine with −24 dB (−37.5 dB). Fixed in `applyEra`: decimation now
+  interpolates linearly. At 44.1 kHz the output is bit-identical, so every
+  existing measurement stands.
+- **Soft limiter.** Harmless when a design's natural crest fits under its
+  ceiling, audible when the level target forces it to work (see footsteps).
+  The new designs' ceilings sit above their natural crest.
+- **Loudness normalisation** works on the loudest 50 ms, so it does not lift
+  tails or noise floors. That is fine as it is.
+- **Reverb send** is fine for short sounds. It mattered only for the ringing
+  metal.
+- **Takes.** In the old designs takes differed too little: the same modes,
+  so the same pitch every time. The new designs draw every element afresh
+  per take, so takes differ in detail and keep the same character.
+
+### Candidates
+
+Each family has `current` (the rejected design, kept for comparison) and
+three new designs, which differ in approach and not just in parameters.
+Code: `candidates.ts`, with building blocks in `foley.ts` (enveloped and
+then filtered noise, grain clouds, dense damped partial clusters, wood
+knocks at random non-harmonic ratios). Numbers are for take 0 at 44.1 kHz.
+Tonal is measured over all takes. rms50 and K are dBFS.
+
+| family | design                 | approach                                                                                                                                                                                         | dur (s)   | d40 (ms) | onset centroid (Hz) | tonal (dB) | rms50 / K    |
+| ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- | -------- | ------------------- | ---------- | ------------ |
+| steps  | A soft boot            | Noise only: low band-passed thump (115–155 Hz) with a 5 ms raised-cosine attack, a softer ball-of-foot roll 30–45 ms later, a quiet scuff (1.4/2.5/1.7 kHz); grate adds noisy rattle bursts      | 0.12–0.16 | 79–92    | 530 / 735 / 408     | 4.3–5.8    | −16 / −16    |
+| steps  | B hard sole            | Unpitched 1.5 ms heel tick, firmer thump, louder scuff, fine grit grains; tile adds a short broad knock; grate is a 50-partial damped clank with two re-contacts                                 | 0.12–0.19 | 81–113   | 1285 / 1137 / 590   | 4.0–7.6    | −15 / −13.5  |
+| steps  | C muffled / heavy      | Noise thump at 90–110 Hz, 7 ms attack, faint low scuff, everything low-passed at 2 kHz; grate is a hollow 70 Hz thud with a little rattle                                                        | 0.17–0.26 | 101–120  | 152 / 211 / 130     | 4.1–4.4    | −16 / −17    |
+| steps  | current                | Modal sole knocks, tile clicks, ringing grate                                                                                                                                                    | 0.11–0.32 | 69–312   | 1297 / 1615 / 782   | 8.6–28.2   | −13 / −12    |
+| metal  | A clank                | 140 partials drawn at random (40 log-spaced 170–1500 Hz, 100 linear 0.8–7.5 kHz), each with scattered damping (d 50, c 14); wide-band contact noise, floor thud, two re-contacts (rattle)        | 0.38      | 214      | 866                 | 6.7        | −10.5 / −9.6 |
+| metal  | B hollow drum          | Six heavily damped low shell modes (~130–420 Hz, jittered per take) under a noisy clatter and a 60-partial short crowd; air "boom"; the rim comes down 50–80 ms later                            | 0.64      | 338      | 268                 | 11.3       | −9.5 / −10.2 |
+| metal  | C case thud            | Mostly noise: 170 Hz thud and 1.2 kHz slap, a brief 40-partial edge (1.5–6.5 kHz, c 45), two tiny rattle bursts                                                                                  | 0.15      | 94       | 377                 | 4.4        | −11 / −11    |
+| metal  | current                | 19 clean modes, d 220                                                                                                                                                                            | 1.20      | 935      | 756                 | 28.6       | −10 / −9.5   |
+| break  | A crack and scatter    | Two dry cracks (sharp edge plus a 1.5–2.8 kHz body, 7–11 ms), the crate's box modes jittered and damped, then 18 wood knocks (random non-harmonic partials plus a click) thinning out over 0.5 s | 0.57      | 528      | 1978                | 5.9        | −11.5 / −9.6 |
+| break  | B short snap           | One crack, a damped wooden thunk and noise thump, four debris ticks within 0.3 s                                                                                                                 | 0.35      | 313      | 802                 | 8.1        | −11 / −9.6   |
+| break  | C splinter and clatter | Crack, then a sparse, uneven grain cloud of snaps (900/s at most, swelling for 40 ms), then 7 planks landing with bounces over 0.9 s                                                             | 0.90      | 826      | 2111                | 7.0        | −14 / −11.8  |
+| break  | current                | Noise wash, crackle, bar-ratio planks                                                                                                                                                            | 0.78      | 673      | 876                 | 15.7       | −9 / −9.1    |
+
+**Levels.** Footsteps now sit lower: −16 dB (A, C) and −15 dB (B), from
+−13 dB. They play 2–3 times a second and the game halves them, so they
+should be the quietest repeated cue. The old level also forced the limiter
+to clip every heel. Land moves with them (−13/−12/−13). Metal stays near
+its old K-weighted level. The breaks are set by K-weighted loudness: A and B
+land 0.5 dB under the old break, and C (the long one) 2.7 dB under, as its
+brief asked. Peak ceilings sit above each design's natural crest.
+
+**Defaults** (`CANDIDATES` in `mix.ts`): A, A, A.
+
+- **Footsteps A.** The most likely causes of the complaint are pitch and
+  hard clicks, and A removes both completely while staying understated. B is
+  the fallback if A turns out too dull; C if the listener wants weight.
+- **Metal A.** It keeps a recognisably metallic identity (a crowd of
+  partials, a hard contact) while losing the bell. C may stop sounding like
+  metal. B is a drum, and the prop is a case.
+- **Break A.** Discrete, woody events, with no wash and no xylophone, at a
+  medium length. B is the fallback if it is too busy, C if the listener wants
+  more of it.
+
+**Selecting.** `CANDIDATES` holds the defaults. Any page URL overrides them
+with `?sfx=footsteps:B,impact_metal:C,crate_break:A` (case-insensitive;
+`metal`, `break` and `steps` also work; unknown entries are ignored). The
+same string works on the game (`index.html?sfx=...`) and on the demo. The
+demo's candidates section switches designs without a reload and shows the
+string to paste. Only the selected design is rendered at start-up: all
+takes of the default set take about 280 ms at 48 kHz.
+
+**Previews.** `bun src/audio/preview.ts --candidates` writes every design
+to `out/audio/cand/`: one PNG and WAV per sound, an 8-step walk at the
+game's cadence (`walk_*.png`), and a contact sheet. It also prints the
+table above.
+
 ## Sources
 
 1. Valve Developer Community, "WAV" — https://developer.valvesoftware.com/wiki/WAV

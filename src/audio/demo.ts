@@ -12,8 +12,16 @@ import {
   type SoundId,
 } from "../core/api";
 import type { Vec3 } from "../math";
-import { createAudioSystem, renderSound } from "./index";
-import { CATEGORY_OF } from "./mix";
+import { CANDIDATE_INFO } from "./candidates";
+import { candidateOf, createAudioSystem, renderVariant } from "./index";
+import {
+  CANDIDATE_NAMES,
+  CATEGORY_OF,
+  FAMILIES,
+  formatSfx,
+  type Candidate,
+  type Family,
+} from "./mix";
 
 const audio = createAudioSystem();
 const $ = <T extends HTMLElement>(id: string) =>
@@ -95,7 +103,12 @@ function play(sound: SoundId, options: PlayOptions): void {
 }
 
 function drawWave(sound: SoundId): void {
-  const data = renderSound(sound, 44100);
+  const data = renderVariant(
+    sound,
+    44100,
+    0,
+    candidateOf(sound, audio.candidates()),
+  );
   const w = canvas.width;
   const h = canvas.height;
   g2d.fillStyle = "#111";
@@ -122,7 +135,11 @@ function drawWave(sound: SoundId): void {
   g2d.stroke();
   g2d.fillStyle = "#9f9";
   g2d.font = "12px monospace";
-  g2d.fillText(`${sound}  ${(data.length / 44100).toFixed(2)}s`, 6, 14);
+  g2d.fillText(
+    `${sound} [${candidateOf(sound, audio.candidates())}]  ${(data.length / 44100).toFixed(2)}s`,
+    6,
+    14,
+  );
 }
 
 function button(label: string, onClick: () => void): HTMLButtonElement {
@@ -131,6 +148,180 @@ function button(label: string, onClick: () => void): HTMLButtonElement {
   b.addEventListener("click", onClick);
   return b;
 }
+
+// --- Candidates (listening round 1) ---------------------------------------------
+
+const FAMILY_LABEL: Record<Family, string> = {
+  footsteps: "footsteps",
+  impact_metal: "metal",
+  crate_break: "break",
+};
+const candidateRows = new Map<string, HTMLDivElement>();
+/** Timers of the sequence playing now, so a new one replaces it. */
+let sequenceTimers: number[] = [];
+
+function schedule(steps: { at: number; run: () => void }[]): void {
+  for (const t of sequenceTimers) clearTimeout(t);
+  sequenceTimers = [];
+  void audio.resume().then(() => {
+    for (const s of steps) sequenceTimers.push(window.setTimeout(s.run, s.at));
+  });
+}
+
+function showSelection(): void {
+  const sel = audio.candidates();
+  for (const f of FAMILIES) {
+    for (const c of CANDIDATE_NAMES) {
+      candidateRows
+        .get(`${f}:${c}`)
+        ?.classList.toggle("selected", sel[f] === c);
+    }
+  }
+  $<HTMLElement>("picks").textContent = FAMILIES.map(
+    (f) => `${FAMILY_LABEL[f]} ${sel[f]}`,
+  ).join(", ");
+  const sfx = `?sfx=${formatSfx(sel)}`;
+  $<HTMLElement>("sfx").textContent = sfx;
+  // Keep the selection across reloads of this page.
+  const url = new URL(location.href);
+  url.searchParams.set("sfx", formatSfx(sel));
+  history.replaceState(
+    null,
+    "",
+    url.toString().replace(/%3A/g, ":").replace(/%2C/g, ","),
+  );
+}
+
+function select(family: Family, candidate: Candidate): void {
+  audio.setCandidate(family, candidate);
+  showSelection();
+}
+
+/** Footsteps as the game plays them: every 0.39 s, gain 0.5, pitch ±4 %. */
+function walk(sound: SoundId): void {
+  drawWave(sound);
+  schedule(
+    Array.from({ length: 8 }, (_, i) => ({
+      at: i * 390,
+      run: () => audio.play(sound, { gain: 0.5, pitch: 0.96 + vary() * 0.08 }),
+    })),
+  );
+}
+
+/** A metal impact of a given strength, with the game's gain/pitch mapping. */
+function metalHit(strength: number): () => void {
+  return () =>
+    audio.play("impact_metal", {
+      gain: 0.1 + 0.9 * strength ** 0.8,
+      pitch: 1.08 - 0.16 * strength + (vary() - 0.5) * 0.06,
+      position: near(3, -0.5),
+    });
+}
+
+const CANDIDATE_BUTTONS: Record<Family, { label: string; run: () => void }[]> =
+  {
+    footsteps: [
+      { label: "walk on concrete", run: () => walk("footstep_concrete") },
+      { label: "walk on tile", run: () => walk("footstep_tile") },
+      { label: "walk on grate", run: () => walk("footstep_metal") },
+      {
+        label: "land",
+        run: () => {
+          drawWave("land");
+          schedule([{ at: 0, run: () => audio.play("land", { gain: 0.8 }) }]);
+        },
+      },
+    ],
+    impact_metal: [
+      ...(
+        [
+          ["soft", 0.12],
+          ["medium", 0.45],
+          ["hard", 1],
+        ] as const
+      ).map(([label, s]) => ({
+        label,
+        run: () => {
+          drawWave("impact_metal");
+          schedule([{ at: 0, run: metalHit(s) }]);
+        },
+      })),
+      {
+        label: "barrel roll",
+        run: () => {
+          drawWave("impact_metal");
+          const hits = [
+            [0, 1],
+            [170, 0.7],
+            [310, 0.45],
+            [420, 0.28],
+            [510, 0.15],
+          ] as const;
+          schedule(hits.map(([at, s]) => ({ at, run: metalHit(s) })));
+        },
+      },
+    ],
+    crate_break: [
+      {
+        label: "break",
+        run: () => {
+          drawWave("crate_break");
+          schedule([
+            {
+              at: 0,
+              run: () => audio.play("crate_break", { position: near(4, 0) }),
+            },
+          ]);
+        },
+      },
+    ],
+  };
+
+const candidatesBox = $<HTMLDivElement>("candidates");
+for (const family of FAMILIES) {
+  const title = document.createElement("div");
+  title.className = "family";
+  title.textContent = FAMILY_LABEL[family];
+  candidatesBox.append(title);
+  for (const c of CANDIDATE_NAMES) {
+    const row = document.createElement("div");
+    row.className = "cand";
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = c;
+    const desc = document.createElement("span");
+    desc.className = "desc";
+    desc.textContent = CANDIDATE_INFO[family][c];
+    row.append(label);
+    for (const b of CANDIDATE_BUTTONS[family]) {
+      row.append(
+        button(b.label, () => {
+          select(family, c);
+          b.run();
+        }),
+      );
+    }
+    row.append(desc);
+    candidateRows.set(`${family}:${c}`, row);
+    candidatesBox.append(row);
+  }
+}
+
+async function copy(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    status.textContent = `copied: ${text}`;
+  } catch {
+    status.textContent = `copy this: ${text}`;
+  }
+}
+$<HTMLButtonElement>("copy-picks").addEventListener("click", () => {
+  void copy($<HTMLElement>("picks").textContent ?? "");
+});
+$<HTMLButtonElement>("copy-sfx").addEventListener("click", () => {
+  void copy($<HTMLElement>("sfx").textContent ?? "");
+});
+showSelection();
 
 // One row per one-shot: soft / medium / hard.
 const loopSet = new Set<SoundId>(LOOPING_SOUNDS);

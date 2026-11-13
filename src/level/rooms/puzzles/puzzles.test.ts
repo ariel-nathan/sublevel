@@ -2,7 +2,7 @@
  * What makes each puzzle room a puzzle, and what makes it solvable, checked
  * across its parameter range (defaults and many random sets), plus the
  * module contract again for more random sets than rooms/contract.test.ts
- * runs (and, for the pending climb room, every check but `verifySolution`).
+ * runs.
  */
 import { describe, expect, test } from "bun:test";
 import type { ButtonDef, PropSpawn } from "../../../core/api";
@@ -27,7 +27,8 @@ import {
   type Connector,
   type RoomPlan,
 } from "../room";
-import { bodyBox, canPress, throwClear, verifySolution } from "../solution";
+import { contractProblems } from "../contract";
+import { bodyBox, canPress, throwClear } from "../solution";
 import { DECON_LOCK, deconLayout, type DeconLockParams } from "./decon-lock";
 import { FAN_ROOM, fanLayout, type FanRoomParams } from "./fan-room";
 import {
@@ -213,46 +214,16 @@ const centre = (b: Box): Vec3 => ({
   z: (b.z0 + b.z1) / 2,
 });
 
-describe("the module contract, for more random parameter sets", () => {
+describe("the module contract (rooms/contract.ts), for more random parameter sets", () => {
   for (const m of [...PUZZLE_MODULES, ...PENDING_MODULES, EXIT_LOCK]) {
-    test(`${m.name}: inside its footprint, exit reachable once open and not before, solution walkable`, () => {
-      for (const mirror of [false, true]) {
-        for (const b of builds(m, mirror)) {
-          const label = JSON.stringify(b.params);
-          expect([label, outsideFootprint(b.plan, b.parts)]).toEqual([
-            label,
-            [],
-          ]);
-          // Light bounds stay in the footprint (plus their reach).
-          for (const l of b.parts.lights) {
-            if (l.flicker !== "none") expect(l.bounds).toBeDefined();
-          }
-          const start = startOf(b.plan);
-          const open = distances(b, start);
-          const reach = (cells: Cells) =>
-            b.plan.exit
-              ? near(cells, centre(boxOf(b.plan.exit)), 0.3)
-              : atDoorway(cells, b.plan.exits[0].connector);
-          expect([label, reach(open) < Infinity]).toEqual([label, true]);
-          if (b.plan.lock.doors.length > 0) {
-            const slabs = b.parts.doors
-              .filter((d) => b.plan.lock.doors.includes(d.id))
-              .map((d) => boxOf(d.closed));
-            const shut = distances(b, start, slabs);
-            expect([label, reach(shut)]).toEqual([label, Infinity]);
-          }
-          if (PENDING_MODULES.includes(m)) continue;
-          const problems = verifySolution(b.plan.solution, start, {
-            solids: b.solids,
-            floors: b.parts.brushes.map(boxOf),
-            props: b.parts.props,
-            buttons: b.parts.buttons,
-            plates: b.parts.plates.map((p) => boxOf(p.box)),
-            within: b.plan.footprint.map(boxOf),
-          });
-          expect([label, problems]).toEqual([label, []]);
-        }
-      }
+    test(`${m.name}: defaults and ${SETS} more random sets, mirrored and not`, () => {
+      expect(
+        contractProblems(m, {
+          randomSets: SETS,
+          seedBase: 1001,
+          orientations: "mirror",
+        }).slice(0, 8),
+      ).toEqual([]);
     });
   }
 });
@@ -566,7 +537,7 @@ describe("decon lock (relay: plate-held door, then a timed door)", () => {
   });
 });
 
-describe("maintenance loft (climb, pending)", () => {
+describe("maintenance loft (climb)", () => {
   test("the deck is out of jump reach, the crates make a staircase to it, the base is clear, the button only works from the deck", () => {
     for (const b of builds(MAINTENANCE_LOFT)) {
       const p = b.params as MaintenanceLoftParams;

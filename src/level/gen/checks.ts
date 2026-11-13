@@ -62,11 +62,9 @@ export function chainProblems(
 ): string[] {
   const out: string[] = [];
   const pool = eligibleModules(config);
-  out.push(
-    ...missionProblems(run.mission, pool, config.rooms, config.maxPerMechanic),
-  );
-  // (Rule 5, the ramp, gives way to rule 6 when one module must repeat:
-  // `ramps` is checked on the real pool by the tests, not here.)
+  out.push(...missionProblems(run.mission, pool, config));
+  // (Rule 6, the ramp, gives way to the others: `ramps` is checked on the
+  // real pool by the tests, not here.)
   const rooms = assembled.rooms;
   const puzzles = run.pieces.filter((p) => p.kind === "room").length;
   if (puzzles !== config.rooms) out.push(`${puzzles} rooms placed`);

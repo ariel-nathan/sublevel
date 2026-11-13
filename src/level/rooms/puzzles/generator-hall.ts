@@ -235,6 +235,17 @@ function build(
           c.x < gx1 + 0.5 &&
           (c.z < z0 + 1.9 || c.z > z1 - 1.9)
         ),
+    )
+    // Clamping to the walls can bring two spots together: keep a crate's
+    // turned width (and a little) between any two.
+    .reduce<{ x: number; z: number }[]>(
+      (kept, c) =>
+        kept.some(
+          (o) => Math.max(Math.abs(o.x - c.x), Math.abs(o.z - c.z)) < 0.9,
+        )
+          ? kept
+          : [...kept, c],
+      [],
     );
   const crates = spots
     .slice(0, p.crates)
@@ -277,6 +288,7 @@ export const GENERATOR_HALL: RoomModule<GeneratorHallParams> = {
   teaches: "impact-target",
   difficulty: 2,
   requires: {},
+  idea: "high-target",
   entrySize: ENTRY_SIZE,
   defaults: {
     length: 10.5,

@@ -471,6 +471,8 @@ export const FILTRATION_HALL: RoomModule = {
   teaches: "timed-door",
   difficulty: 2,
   requires: {},
+  setPiece: true,
+  idea: "timed-door-wedge",
   entrySize: { width: [1.2, 2.0], height: [2.2, 2.6] },
   defaults: {},
   random: () => ({}),

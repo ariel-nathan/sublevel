@@ -263,6 +263,7 @@ export const FREIGHT_PASSAGE: RoomModule<FreightPassageParams> = {
   teaches: "push",
   difficulty: 1,
   requires: {},
+  position: "early",
   entrySize: ENTRY_SIZE,
   defaults: {
     lobby: 7,

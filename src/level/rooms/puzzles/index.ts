@@ -2,9 +2,9 @@
  * The library of parametric puzzle rooms (see README.md in src/level).
  * `PUZZLE_MODULES` are registered (rooms/registry.ts) and proven by the
  * contract tests and the solver bot; `PENDING_MODULES` are complete rooms
- * whose declared solution needs a step the solution format cannot express
- * yet (climbing onto props): development levels can name them, the
- * generator must not use them.
+ * not yet ready for the generator (development levels can name them; none
+ * at the moment). `EXIT_LOCK` is the finish of generated runs and
+ * development levels.
  */
 import type { AnyRoomModule } from "../room";
 import { EXIT_LOCK } from "./exit-lock";
@@ -29,6 +29,7 @@ export const PUZZLE_MODULES: readonly AnyRoomModule[] = [
   DECON_LOCK,
   PUMP_GALLERY,
   FAN_ROOM,
+  MAINTENANCE_LOFT,
 ];
 
-export const PENDING_MODULES: readonly AnyRoomModule[] = [MAINTENANCE_LOFT];
+export const PENDING_MODULES: readonly AnyRoomModule[] = [];

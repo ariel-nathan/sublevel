@@ -29,7 +29,7 @@ import {
   type RoomModule,
   type RoomPlan,
 } from "../../rooms/room";
-import { r05 } from "./shell";
+const r05 = (v: number): number => Math.round(v * 20) / 20;
 
 export interface AdapterParams {
   /** Outer length along the entry's facing, 2.0 to 3.0 m. */

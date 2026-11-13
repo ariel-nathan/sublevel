@@ -4,6 +4,11 @@
  * (tools/solve.ts), which acts on it, and by the module tests, which check
  * every step of every module against the brushes before anyone plays it
  * (`verifySolution`). Pure: no DOM, no physics.
+ *
+ * Climbing: a `climb` jumps (or steps) up to a surface at most
+ * PLAYER.jumpHeight above the feet and CLIMB_REACH away, landing on a
+ * standable square with headroom; a `walk` may step down off a ledge or a
+ * prop (a drop of up to SAFE_DROP). Props' tops count as surfaces.
  */
 import type {
   ButtonDef,
@@ -214,9 +219,11 @@ export function carryPlan(
         ),
       );
     }
-    // ...and the drop to rest.
-    for (let y = holdY; y >= to.y && ok; y -= 0.05) {
-      ok = clear(kindBox(kind, { x: to.x, y, z: to.z }, 0.005));
+    // ...and the drop to rest (onto the floor or a prop's top: the box's
+    // bottom stops a centimetre short of the resting height).
+    for (let y = holdY; y >= to.y - 1e-6 && ok; y -= 0.05) {
+      const box = kindBox(kind, { x: to.x, y, z: to.z }, 0.005);
+      ok = clear({ ...box, y0: Math.max(box.y0, to.y - half.y + 0.01) });
     }
     if (ok) return { stand, holdY, pitchDeg };
   }
@@ -318,11 +325,55 @@ export function pushApproach(kind: PropKind, from: Point2, to: Point2): Point2 {
 // Verification
 // ---------------------------------------------------------------------------
 
+/** Highest drop a walk may step down (metres). */
+export const SAFE_DROP = 2.5;
+/** How far past an edge a dropping player may come down. */
+export const FALL_REACH = 0.6;
+/** Farthest a climb may reach horizontally, from where it starts. */
+export const CLIMB_REACH = 1.6;
+/** Half the side of the square a climb must land on (all of it standable). */
+export const LANDING = 0.15;
+
+/**
+ * The solid box of a prop the solution has moved (carried or pushed): the
+ * bot sets props down and pushes them at whatever turn they end up with,
+ * so its box is axis-aligned with the prop's largest horizontal
+ * half-extent (what the solver bot assumes too, tools/solver.ts).
+ */
+export function movedPropBox(kind: PropKind, c: Vec3): Box {
+  const h = PROP_SPECS[kind].halfExtents;
+  const r = Math.max(h.x, h.z);
+  return {
+    x0: c.x - r,
+    x1: c.x + r,
+    y0: c.y - h.y,
+    y1: c.y + h.y,
+    z0: c.z - r,
+    z1: c.z + r,
+  };
+}
+
+/**
+ * Where on a prop's top one can stand: a flat box at the top's height, the
+ * axis-aligned square that the top covers at its turn (a moved prop's turn
+ * is unknown: a little less than its smaller half-extent).
+ */
+export function propTop(p: PropSpawn, moved: boolean): Box {
+  const h = PROP_SPECS[p.kind].halfExtents;
+  const a = Math.min(h.x, h.z);
+  const s = moved
+    ? a * 0.85
+    : a / (Math.abs(Math.cos(p.yaw)) + Math.abs(Math.sin(p.yaw)));
+  const c = p.position;
+  const y = c.y + h.y;
+  return { x0: c.x - s, x1: c.x + s, y0: y, y1: y, z0: c.z - s, z1: c.z + s };
+}
+
 /** What a solution is checked against. */
 export interface SolutionWorld {
   /** Solid boxes: brush colliders (skirting raised) and closed nothing else. */
   solids: Box[];
-  /** Tops a player can stand on: brush boxes. */
+  /** Tops a player can stand on: brush boxes (and props' tops, added here). */
   floors: Box[];
   props: PropSpawn[];
   buttons: ButtonDef[];
@@ -335,8 +386,12 @@ export interface SolutionWorld {
  * Plays a solution on paper from `start` and returns what is wrong with it
  * (empty if nothing): walks off the floor or into brushes or props, buttons
  * out of reach, props too heavy to carry or not heavy enough to need
- * pushing, set-downs and throws with no clear way. Props moved by the
- * solution are tracked; a thrown one is no longer an obstacle.
+ * pushing, set-downs and throws with no clear way, climbs too high or with
+ * nothing to land on. Props moved by the solution are tracked (with the box
+ * of `movedPropBox`); a thrown one is no longer an obstacle. The tops of
+ * props are surfaces to stand on; a `walk` may step down a drop of up to
+ * SAFE_DROP (off a ledge or a crate), or up a step of PLAYER.stepHeight;
+ * anything higher is a `climb`.
  */
 export function verifySolution(
   steps: SolutionStep[],
@@ -344,21 +399,31 @@ export function verifySolution(
   world: SolutionWorld,
 ): string[] {
   const problems: string[] = [];
-  const props = world.props.map((p) => ({ ...p, position: { ...p.position } }));
+  const props = world.props.map((p) => ({
+    ...p,
+    position: { ...p.position },
+    moved: false,
+  }));
   const gone = new Set<number>();
   let feet: Vec3 = { ...start };
+  const solidOf = (p: (typeof props)[number]): Box =>
+    p.moved ? movedPropBox(p.kind, p.position) : propBox(p);
   const solidClear =
     (ignore: number): Clear =>
     (box) =>
       !world.solids.some((s) => boxesOverlap(s, box, 1e-4)) &&
       !props.some(
         (p, i) =>
-          i !== ignore && !gone.has(i) && boxesOverlap(propBox(p), box, 1e-4),
+          i !== ignore && !gone.has(i) && boxesOverlap(solidOf(p), box, 1e-4),
       );
-  const onFloor = (p: Point2): boolean =>
-    world.floors.some(
+  const surfaces = (): Box[] => [
+    ...world.floors,
+    ...props.flatMap((p, i) => (gone.has(i) ? [] : [propTop(p, p.moved)])),
+  ];
+  const standable = (all: Box[], p: Point2, y: number): boolean =>
+    all.some(
       (f) =>
-        Math.abs(f.y1 - feet.y) < 0.05 &&
+        Math.abs(f.y1 - y) < 0.05 &&
         p.x >= f.x0 - 1e-6 &&
         p.x <= f.x1 + 1e-6 &&
         p.z >= f.z0 - 1e-6 &&
@@ -373,27 +438,82 @@ export function verifySolution(
         p.z >= b.z0 - 1e-6 &&
         p.z <= b.z1 + 1e-6,
     );
-  const walk = (to: Point2, label: string, ignore = -1): void => {
-    const n = Math.max(1, Math.ceil(hyp(feet, to) / 0.1));
+  const at = (p: Point2) => `(${p.x.toFixed(2)}, ${p.z.toFixed(2)})`;
+  /**
+   * Walks straight to `to` at the current height; if `to` is lower (a
+   * drop) or a step higher, the feet move to its height where there is a
+   * surface at that height and none at the current one.
+   */
+  const walk = (to: Vec3 | Point2, label: string, ignore = -1): void => {
+    const all = surfaces();
+    const target = "y" in to ? to.y : feet.y;
+    const change = target - feet.y;
+    if (change > PLAYER.stepHeight + 1e-6) {
+      problems.push(
+        `${label}: walks ${change.toFixed(2)} m up (more than a step: climb)`,
+      );
+    }
+    if (-change > SAFE_DROP + 1e-6) {
+      problems.push(`${label}: a drop of ${(-change).toFixed(2)} m`);
+    }
+    let y = feet.y;
+    // Stepping off an edge: the body comes down beside it, so until it is
+    // clear at the lower height (within FALL_REACH), it is checked at the
+    // height it left.
+    let falling = -1;
+    const clear = solidClear(ignore);
+    const n = Math.max(1, Math.ceil(hyp(feet, to) / 0.05));
+    const length = hyp(feet, to);
     for (let i = 0; i <= n; i++) {
       const t = i / n;
       const p = {
         x: feet.x + (to.x - feet.x) * t,
         z: feet.z + (to.z - feet.z) * t,
       };
-      if (!onFloor(p) || !inRegion(p)) {
+      if (!inRegion(p)) {
+        problems.push(`${label}: ${at(p)} is outside the module`);
+        break;
+      }
+      if (falling >= 0) {
+        if (clear(bodyBox({ ...p, y: target }))) {
+          falling = -1;
+          y = target;
+        } else if (
+          (t - falling) * length > FALL_REACH ||
+          !clear(bodyBox({ ...p, y }))
+        ) {
+          problems.push(`${label}: nowhere to land past ${at(p)}`);
+          break;
+        }
+        continue;
+      }
+      if (!standable(all, p, y)) {
+        if (
+          Math.abs(change) > 0.05 &&
+          y !== target &&
+          standable(all, p, target)
+        ) {
+          if (change < 0 && !clear(bodyBox({ ...p, y: target }))) {
+            falling = t;
+            continue;
+          }
+          y = target;
+        } else {
+          problems.push(`${label}: ${at(p)} is off the floor`);
+          break;
+        }
+      }
+      if (!clear(bodyBox({ ...p, y }))) {
         problems.push(
-          `${label}: (${p.x.toFixed(2)}, ${p.z.toFixed(2)}) is off the floor`,
+          `${label}: the way from ${at(feet)} to ${at(to)} is blocked at ${at(p)}`,
         );
         break;
       }
     }
-    if (!walkClear(feet, to, solidClear(ignore))) {
-      problems.push(
-        `${label}: the way from (${feet.x.toFixed(2)}, ${feet.z.toFixed(2)}) to (${to.x.toFixed(2)}, ${to.z.toFixed(2)}) is blocked`,
-      );
+    if (Math.abs(change) > 0.05 && y !== target) {
+      problems.push(`${label}: never reaches the height ${target.toFixed(2)}`);
     }
-    feet = { x: to.x, y: feet.y, z: to.z };
+    feet = { x: to.x, y, z: to.z };
   };
   const prop = (i: number, label: string) => {
     if (i < 0 || i >= props.length || gone.has(i)) {
@@ -407,8 +527,47 @@ export function verifySolution(
     switch (step.do) {
       case "walk":
         walk(step.to, label);
-        feet = { ...feet, y: step.to.y };
         break;
+      case "climb": {
+        const to = step.to;
+        const rise = to.y - feet.y;
+        if (rise <= 0.05)
+          problems.push(`${label}: ${rise.toFixed(2)} m is no climb`);
+        if (rise > PLAYER.jumpHeight + 1e-6)
+          problems.push(
+            `${label}: ${rise.toFixed(2)} m is higher than a jump (${PLAYER.jumpHeight} m)`,
+          );
+        if (hyp(feet, to) > CLIMB_REACH)
+          problems.push(`${label}: ${at(to)} is out of a jump's reach`);
+        const all = surfaces();
+        const landing = [-1, 1].flatMap((sx) =>
+          [-1, 1].map((sz) => ({
+            x: to.x + sx * LANDING,
+            z: to.z + sz * LANDING,
+          })),
+        );
+        if (!landing.every((p) => standable(all, p, to.y)))
+          problems.push(`${label}: nothing to land on at ${at(to)}`);
+        // Up and over: the body at the landing height, all the way.
+        const clear = solidClear(-1);
+        const k = Math.max(1, Math.ceil(hyp(feet, to) / 0.05));
+        for (let i = 0; i <= k; i++) {
+          const t = i / k;
+          const p = {
+            x: feet.x + (to.x - feet.x) * t,
+            y: to.y,
+            z: feet.z + (to.z - feet.z) * t,
+          };
+          if (!clear(bodyBox(p))) {
+            problems.push(
+              `${label}: no room to climb at ${at(p)} (headroom or an obstacle)`,
+            );
+            break;
+          }
+        }
+        feet = { ...to };
+        break;
+      }
       case "press": {
         const b = world.buttons.find((x) => x.id === step.button);
         if (!b) problems.push(`${label}: no button "${step.button}"`);
@@ -446,6 +605,7 @@ export function verifySolution(
           }
           walk(plan.stand, `${label} setting down`, step.prop);
           p.position = { ...step.to };
+          p.moved = true;
         } else {
           walk(origin, `${label} returning to throw`, step.prop);
           if (!throwClear(p.kind, feet, step.at, solidClear(step.prop))) {
@@ -458,7 +618,7 @@ export function verifySolution(
       case "push": {
         const p = prop(step.prop, label);
         if (!p) break;
-        const box = propBox(p);
+        const box = solidOf(p);
         const dist = hyp(p.position, step.to);
         const n2 = Math.max(1, Math.ceil(dist / 0.05));
         for (let i = 0; i <= n2; i++) {
@@ -483,6 +643,7 @@ export function verifySolution(
         const approach = pushApproach(p.kind, p.position, step.to);
         walk(approach, `${label} approaching`, -1);
         p.position = { ...step.to };
+        p.moved = true;
         // The player ends up just behind it.
         const back = pushApproach(p.kind, step.to, {
           x: step.to.x + (step.to.x - approach.x),

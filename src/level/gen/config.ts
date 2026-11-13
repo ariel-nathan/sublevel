@@ -2,9 +2,10 @@ import type { Color, Fog } from "../../core/api";
 import { KESTREL_ANNEX } from "../define";
 import { CORRIDOR, type CorridorParams } from "../rooms/corridor";
 import { LAB } from "../rooms/lab";
+import { EXIT_LOCK } from "../rooms/puzzles";
 import { ROOM_MODULES } from "../rooms/registry";
 import type { AnyRoomModule, RoomModule } from "../rooms/room";
-import { ADAPTER, EXIT_LOCK, STANDIN_MODULES } from "./modules";
+import { ADAPTER } from "./modules";
 
 /** Everything that tunes a generated run. `DEFAULT_CONFIG` is what the game uses. */
 export interface GeneratorConfig {
@@ -23,6 +24,11 @@ export interface GeneratorConfig {
   pool: () => readonly AnyRoomModule[];
   /** A mechanic appears at most this often, unless variety runs out. */
   maxPerMechanic: number;
+  /**
+   * How many authored set pieces (modules with `setPiece`) a run has, at
+   * least and at most: the seed chooses the number and which.
+   */
+  setPieces: readonly [number, number];
   /** Least gap between the footprints of modules that are not neighbours. */
   clearance: number;
   /** Corridor lengths and second-leg lengths the layout search tries. */
@@ -44,8 +50,9 @@ export const DEFAULT_CONFIG: GeneratorConfig = {
   finish: EXIT_LOCK,
   corridor: CORRIDOR,
   adapter: ADAPTER,
-  pool: () => [...ROOM_MODULES, ...STANDIN_MODULES],
+  pool: () => ROOM_MODULES,
   maxPerMechanic: 2,
+  setPieces: [1, 2],
   clearance: 0.5,
   corridorLengths: [3, 4.5, 6, 8],
   corridorLegs: [0, 1.5, 3],

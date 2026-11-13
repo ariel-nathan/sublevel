@@ -364,6 +364,8 @@ export const DECON_LOCK: RoomModule<DeconLockParams> = {
   teaches: "timed-door",
   difficulty: 3,
   requires: {},
+  // A plate-held door, then a timed door: both taught before.
+  after: ["weighted-plate", "timed-door"],
   entrySize: ENTRY_SIZE,
   defaults: {
     hall: 10,

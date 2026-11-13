@@ -234,7 +234,7 @@ export function renderPlan(level: LevelData, options: PlanOptions = {}): Image {
     level.solution.forEach((s, i) => {
       const n = String(i + 1);
       let mark: { x: number; z: number } | null = null;
-      if (s.do === "walk") {
+      if (s.do === "walk" || s.do === "climb") {
         c.line(at.x, at.z, s.to.x, s.to.z, BLUE);
         at = s.to;
         mark = s.to;
@@ -262,7 +262,7 @@ export function renderPlan(level: LevelData, options: PlanOptions = {}): Image {
       if (mark && options.numbers !== false) {
         const px = c.px(mark.x);
         const py = c.pz(mark.z);
-        const label = `${n}${{ walk: "", press: "P", carry: "C", push: "U", throw: "T", wait: "" }[s.do]}`;
+        const label = `${n}${{ walk: "", climb: "J", press: "P", carry: "C", push: "U", throw: "T", wait: "" }[s.do]}`;
         const w = textWidth(label, 2);
         for (let dy = -2; dy < 12; dy++) {
           for (let dx = -2; dx < w + 2; dx++)

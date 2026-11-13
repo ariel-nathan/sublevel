@@ -237,6 +237,7 @@ export const RECORDS_OFFICE: RoomModule<RecordsOfficeParams> = {
   teaches: "toggle-button",
   difficulty: 1,
   requires: {},
+  position: "first",
   entrySize: ENTRY_SIZE,
   defaults: {
     length: 10,

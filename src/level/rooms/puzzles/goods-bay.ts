@@ -304,6 +304,7 @@ export const GOODS_BAY: RoomModule<GoodsBayParams> = {
   teaches: "weighted-plate",
   difficulty: 1,
   requires: {},
+  idea: "crates-on-plate",
   entrySize: ENTRY_SIZE,
   defaults: {
     length: 12,

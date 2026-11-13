@@ -268,6 +268,8 @@ export const VALVE_CHAMBER: RoomModule = {
   teaches: "impact-target",
   difficulty: 2,
   requires: {},
+  setPiece: true,
+  idea: "high-target",
   // The entry frame on this side is laid out for door T's opening.
   entrySize: { width: [2.0, 2.0], height: [2.4, 2.4] },
   defaults: {},

@@ -701,10 +701,10 @@ export class Pilot {
   }
 
   /**
-   * Sets the held body down so that it comes to rest at (x, y, z): tilts the
-   * view so the body hangs at `holdY` before walking (so it is carried at
-   * that height), walks straight to `stand`, faces the point, lets the body
-   * settle and lets go. Returns where the body came to rest, or null if
+   * Sets the held body down so that it comes to rest at (x, y, z): walks
+   * straight to `stand` holding it no lower than it was picked up nor than
+   * the release height, faces the point, tilts to `pitchDeg` (the body
+   * hangs at the release height), lets the body settle and lets go. Returns where the body came to rest, or null if
    * nothing was held or it could not be let go.
    */
   async setDown(
@@ -720,13 +720,15 @@ export class Pilot {
       this.log("setDown: nothing held");
       return null;
     }
-    const toward = lookToward(start.player.feet, {
-      x: stand.x,
-      y: 0,
-      z: stand.z,
-    });
-    await this.look(toward.yawDeg, pitchDeg, true);
-    await this.raw(10);
+    // Carry it no lower than it was picked up (tilting down first would drag
+    // a prop taken off a ledge into the ledge) nor than the release height
+    // (the way carryPlan checked), then tilt to the release height over
+    // the point.
+    const carryPitch = Math.max(start.player.pitchDeg, pitchDeg);
+    if (carryPitch > start.player.pitchDeg + 0.5) {
+      await this.look(start.player.yawDeg, carryPitch, true);
+      await this.raw(10);
+    }
     const walk = await this.walkTo(stand.x, stand.z, {
       direct: true,
       tolerance: 0.1,

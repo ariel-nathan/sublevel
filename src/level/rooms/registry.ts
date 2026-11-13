@@ -11,6 +11,7 @@ import { LAB } from "./lab";
 import { SERVICE_CORRIDOR } from "./service-corridor";
 import { STORAGE } from "./storage";
 import { VALVE_CHAMBER } from "./valve-chamber";
+import { EXIT_LOCK, PUZZLE_MODULES } from "./puzzles";
 
 export const ROOM_MODULES: readonly AnyRoomModule[] = [
   LAB,
@@ -20,4 +21,6 @@ export const ROOM_MODULES: readonly AnyRoomModule[] = [
   VALVE_CHAMBER,
   EGRESS_LOCK,
   CORRIDOR,
+  ...PUZZLE_MODULES,
+  EXIT_LOCK,
 ];

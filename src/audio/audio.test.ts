@@ -280,12 +280,14 @@ describe("loudness targets", () => {
     expect(level("footstep_concrete")).toBeGreaterThan(level("pickup"));
     // The rejected break design was set loudest by plain RMS. The new ones
     // are brighter, so they are compared by K-weighted loudness: a break
-    // still lands at least about as loud as a hard wooden impact.
+    // still lands about as loud as a hard wooden impact. The chosen design
+    // (C, picked by ear) is deliberately a little quieter and longer, so it
+    // may sit up to 3 dB under.
     expect(LOUDNESS.crate_break.rmsDb).toBeGreaterThanOrEqual(
       LOUDNESS.impact_wood.rmsDb,
     );
     expect(kLoudnessDb(render("crate_break"), 44100)).toBeGreaterThan(
-      kLoudnessDb(render("impact_wood"), 44100) - 1,
+      kLoudnessDb(render("impact_wood"), 44100) - 3,
     );
     for (const id of LOOPING_SOUNDS) {
       for (const other of SOUND_IDS) {

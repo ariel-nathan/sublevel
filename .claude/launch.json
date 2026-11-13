@@ -8,10 +8,10 @@
       "port": 3210
     },
     {
-      "name": "sublevel-dist",
+      "name": "sublevel-audio",
       "runtimeExecutable": "bun",
-      "runtimeArgs": ["./dist/index.html", "--port", "3211"],
-      "port": 3211
+      "runtimeArgs": ["./demos/audio.html", "--port", "3240"],
+      "port": 3240
     }
   ]
 }

@@ -136,7 +136,7 @@ export const FAMILY_SOUNDS: Readonly<Record<Family, readonly SoundId[]>> = {
 export const CANDIDATES: Readonly<Record<Family, Candidate>> = {
   footsteps: "A",
   impact_metal: "A",
-  crate_break: "A",
+  crate_break: "C",
 };
 
 export type CandidateSelection = Record<Family, Candidate>;

@@ -3,7 +3,7 @@ import { MATERIALS, type MaterialId } from "../core/materials";
 import { BOX_FACES, MeshBuilder, type MeshData } from "../core/mesh";
 import type { AirGrid } from "./airgrid";
 import type { LightBaker } from "./bake";
-import { boxOf, BoxIndex, type Box } from "./geometry";
+import { boxOf, BoxGrid, BoxIndex, type Box } from "./geometry";
 
 /** Largest cell edge of the world-aligned tessellation grid, in metres. */
 export const GRID = 0.5;
@@ -143,8 +143,13 @@ export function faceCells(
   const opaque = new BoxIndex(
     boxes.filter((_, n) => !isSeeThrough(brushes[n])),
   );
+  // Brushes that may touch a face come from a grid (a superset), then the
+  // exact test below decides, so the cuts are those of comparing all pairs.
+  const near = new BoxGrid(boxes);
   const out: FaceCells[] = [];
   const pos = [0, 0, 0];
+  const lo3 = [0, 0, 0];
+  const hi3 = [0, 0, 0];
   boxes.forEach((box, n) => {
     const covers = isSeeThrough(brushes[n]) ? index : opaque;
     for (const basis of BOX_FACES) {
@@ -160,7 +165,14 @@ export function faceCells(
       const front = plane + na.sign * FRONT;
       const cutU: number[] = [];
       const cutV: number[] = [];
-      boxes.forEach((o, m) => {
+      lo3[na.axis] = front - 1e-3;
+      hi3[na.axis] = front + 1e-3;
+      lo3[ua.axis] = u0;
+      hi3[ua.axis] = u1;
+      lo3[va.axis] = v0;
+      hi3[va.axis] = v1;
+      near.forEachNear(lo3, hi3, (m) => {
+        const o = boxes[m];
         if (m === n) return;
         if (lowOf(o, na.axis) > front || highOf(o, na.axis) < front) return;
         if (lowOf(o, ua.axis) >= u1 || highOf(o, ua.axis) <= u0) return;
@@ -250,38 +262,67 @@ export function forEachVisibleCell(
 }
 
 /**
+ * A number for `x.toFixed(5)`: equal for two coordinates exactly when their
+ * five-decimal texts are equal ("-0.00000" included), without building the
+ * text unless x is within rounding error of a half step.
+ */
+export function fixed5(x: number): number {
+  const s = x * 1e5;
+  const n = Math.round(s);
+  if (Math.abs(Math.abs(s - n) - 0.5) > 1e-6) {
+    return n === 0 && x < 0 ? NEGATIVE_ZERO_KEY : n;
+  }
+  const text = x.toFixed(5);
+  const v = Math.round(Number(text) * 1e5);
+  return v === 0 && text.startsWith("-") ? NEGATIVE_ZERO_KEY : v;
+}
+/** fixed5 of a small negative number ("-0.00000"), distinct from 0. */
+const NEGATIVE_ZERO_KEY = -0.25;
+
+/**
  * Every emitted vertex, grouped by the axis-aligned lines through it, to find
  * the vertices that lie inside an edge.
  */
 class EdgeLines {
-  private readonly lines = new Map<string, number[]>();
-  private readonly sorted = new Set<string>();
+  /** Per axis: lines by the other two coordinates (fixed5 keys). */
+  private readonly lines = [0, 1, 2].map(
+    () => new Map<number, Map<number, { ts: number[]; sorted: boolean }>>(),
+  );
 
-  private static key(p: readonly number[], axis: number): string {
-    const a = p[(axis + 1) % 3].toFixed(5);
-    const b = p[(axis + 2) % 3].toFixed(5);
-    return `${axis}|${a}|${b}`;
+  private line(p: readonly number[], axis: number, create: boolean) {
+    const a = fixed5(p[(axis + 1) % 3]);
+    const b = fixed5(p[(axis + 2) % 3]);
+    let byA = this.lines[axis].get(a);
+    if (!byA) {
+      if (!create) return undefined;
+      byA = new Map();
+      this.lines[axis].set(a, byA);
+    }
+    let line = byA.get(b);
+    if (!line && create) {
+      line = { ts: [], sorted: false };
+      byA.set(b, line);
+    }
+    return line;
   }
 
   add(p: readonly number[]): void {
     for (let axis = 0; axis < 3; axis++) {
-      const key = EdgeLines.key(p, axis);
-      const list = this.lines.get(key);
-      if (list) list.push(p[axis]);
-      else this.lines.set(key, [p[axis]]);
-      this.sorted.delete(key);
+      const line = this.line(p, axis, true)!;
+      line.ts.push(p[axis]);
+      line.sorted = false;
     }
   }
 
   /** Points strictly inside the axis-aligned segment a..b, in order from a. */
   between(a: readonly number[], b: readonly number[]): number[][] {
     const axis = a[0] !== b[0] ? 0 : a[1] !== b[1] ? 1 : 2;
-    const key = EdgeLines.key(a, axis);
-    const list = this.lines.get(key);
-    if (!list) return [];
-    if (!this.sorted.has(key)) {
+    const line = this.line(a, axis, false);
+    if (!line) return [];
+    const list = line.ts;
+    if (!line.sorted) {
       list.sort((p, q) => p - q);
-      this.sorted.add(key);
+      line.sorted = true;
     }
     const lo = Math.min(a[axis], b[axis]) + 1e-5;
     const hi = Math.max(a[axis], b[axis]) - 1e-5;
@@ -308,6 +349,7 @@ export function generateMeshes(
   brushes: readonly Brush[],
   air: AirGrid,
   baker: LightBaker,
+  timings?: { faces?: number; bake?: number },
 ): MeshData[] {
   const builders = new Map<MaterialId, MeshBuilder>();
   const builderFor = (material: MaterialId): MeshBuilder => {
@@ -319,7 +361,10 @@ export function generateMeshes(
     return b;
   };
 
+  const facesStart = performance.now();
   const faces = faceCells(brushes, air);
+  if (timings) timings.faces = performance.now() - facesStart;
+  let bakeMs = 0;
   const lines = new EdgeLines();
   for (const f of faces) {
     forEachVisibleCell(f, (corners) => {
@@ -340,16 +385,25 @@ export function generateMeshes(
     const vMax = f.vs[f.vs.length - 1];
     const uSpan = Math.max(uMax - uMin, 1e-6);
     const vSpan = Math.max(vMax - vMin, 1e-6);
-    const cache = new Map<string, number>();
+    // Vertices by their in-plane coordinates (every vertex of a face lies
+    // on its plane), five decimals as fixed5 keys.
+    const cache = new Map<number, Map<number, number>>();
     const builder = builderFor(material);
 
     const vertex = (pos: readonly number[]): number => {
-      const key = `${pos[0].toFixed(5)},${pos[1].toFixed(5)},${pos[2].toFixed(5)}`;
-      const hit = cache.get(key);
+      const ku = fixed5(pos[f.u]);
+      const kv = fixed5(pos[f.v]);
+      let row = cache.get(ku);
+      if (!row) {
+        row = new Map();
+        cache.set(ku, row);
+      }
+      const hit = row.get(kv);
       if (hit !== undefined) return hit;
       const color = emissive
         ? { x: 1, y: 1, z: 1 }
         : (() => {
+            const t0 = timings ? performance.now() : 0;
             const c = baker.sample(
               pos[0],
               pos[1],
@@ -358,6 +412,7 @@ export function generateMeshes(
               basis.normal.y,
               basis.normal.z,
             );
+            if (timings) bakeMs += performance.now() - t0;
             return { x: c[0], y: c[1], z: c[2] };
           })();
       const idx = builder.addVertex(
@@ -375,7 +430,7 @@ export function generateMeshes(
             },
         color,
       );
-      cache.set(key, idx);
+      row.set(kv, idx);
       return idx;
     };
 
@@ -409,5 +464,6 @@ export function generateMeshes(
   for (const builder of builders.values()) {
     if (builder.vertexCount > 0) meshes.push(builder.build());
   }
+  if (timings) timings.bake = bakeMs;
   return meshes;
 }

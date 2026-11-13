@@ -12,12 +12,21 @@ import {
 } from "../core/api";
 import { createRng, hashString } from "../core/rng";
 import type { Vec3 } from "../math";
+import { CANDIDATE_RECIPES } from "./candidates";
 import {
   BUSES,
+  CANDIDATES,
   CATEGORY_OF,
+  ERA,
   PRIORITY_OF,
+  familyOf,
   finishSound,
+  loudnessFor,
+  parseSfx,
+  type Candidate,
+  type CandidateSelection,
   type CompressorSettings,
+  type Family,
 } from "./mix";
 import { RECIPES, VARIANTS } from "./recipes";
 import {
@@ -40,28 +49,67 @@ export function renderSound(sound: SoundId, sampleRate: number): Float32Array {
   return renderVariant(sound, sampleRate, 0);
 }
 
+/** The design `sound` uses under `selection` ("current" for one-design sounds). */
+export function candidateOf(
+  sound: SoundId,
+  selection: Readonly<CandidateSelection> = CANDIDATES,
+): Candidate {
+  const family = familyOf(sound);
+  return family ? selection[family] : "current";
+}
+
 /**
- * Synthesises take `variant` (0..VARIANTS[sound]-1) of a sound. Take 0 is
+ * Synthesises take `variant` (0..VARIANTS[sound]-1) of a sound, in the
+ * design `candidate` (default: the family's entry in `CANDIDATES`). Take 0 is
  * `renderSound`. Pure and deterministic.
  */
 export function renderVariant(
   sound: SoundId,
   sampleRate: number,
   variant: number,
+  candidate: Candidate = candidateOf(sound),
 ): Float32Array {
-  const seed = hashString(variant === 0 ? sound : `${sound}#${variant}`);
-  const raw = RECIPES[sound]({
+  const recipe =
+    candidate === "current"
+      ? RECIPES[sound]
+      : (CANDIDATE_RECIPES[candidate][sound] ?? RECIPES[sound]);
+  const name = candidate === "current" ? sound : `${sound}@${candidate}`;
+  const seed = hashString(variant === 0 ? name : `${name}#${variant}`);
+  const raw = recipe({
     sr: sampleRate,
     rng: createRng(seed),
     variant,
   });
-  return finishSound(sound, raw, sampleRate, LOOPING.has(sound));
+  return finishSound(
+    sound,
+    raw,
+    sampleRate,
+    LOOPING.has(sound),
+    ERA,
+    loudnessFor(sound, candidate),
+  );
+}
+
+/**
+ * The design selection a page asks for: `CANDIDATES`, overridden by the
+ * page URL's `?sfx=` when running in a browser.
+ */
+function initialSelection(): CandidateSelection {
+  const selection: CandidateSelection = { ...CANDIDATES };
+  const location = (globalThis as { location?: { search?: string } }).location;
+  if (typeof location?.search === "string")
+    Object.assign(selection, parseSfx(location.search));
+  return selection;
 }
 
 /** Extra controls beyond the game contract, used by the demo page. */
 export interface AudioDebugControls {
   /** Turns the room reverb on or off. */
   setReverbEnabled(on: boolean): void;
+  /** Picks the design a family plays from now on (no reload needed). */
+  setCandidate(family: Family, candidate: Candidate): void;
+  /** The current design selection. */
+  candidates(): CandidateSelection;
 }
 
 interface Chain {
@@ -113,6 +161,7 @@ export function createAudioSystem(): AudioSystem & AudioDebugControls {
   const loops = new Map<number, LoopEntry>();
   const limiter: VoiceLimiter = createVoiceLimiter();
   const takeCounter = new Map<SoundId, number>();
+  const selection = initialSelection();
   let nextLoopId = 1;
   let prerenderQueued = false;
   const listener = {
@@ -202,10 +251,11 @@ export function createAudioSystem(): AudioSystem & AudioDebugControls {
 
   function bufferFor(sound: SoundId, variant: number): AudioBuffer | null {
     if (!ctx) return null;
-    const key = `${sound}#${variant}`;
+    const candidate = candidateOf(sound, selection);
+    const key = `${sound}@${candidate}#${variant}`;
     let buf = buffers.get(key);
     if (!buf) {
-      const data = renderVariant(sound, ctx.sampleRate, variant);
+      const data = renderVariant(sound, ctx.sampleRate, variant, candidate);
       buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
       buf.copyToChannel(data as Float32Array<ArrayBuffer>, 0);
       buffers.set(key, buf);
@@ -457,6 +507,14 @@ export function createAudioSystem(): AudioSystem & AudioDebugControls {
       reverbOn = on;
       if (ctx && reverbReturn)
         reverbReturn.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.02);
+    },
+
+    setCandidate(family, candidate) {
+      selection[family] = candidate;
+    },
+
+    candidates() {
+      return { ...selection };
     },
   };
 }

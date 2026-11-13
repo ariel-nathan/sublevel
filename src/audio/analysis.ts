@@ -3,6 +3,7 @@
  * numbers and pictures instead of by ear. Pure (used by tests and by the
  * preview script).
  */
+import { biquad } from "./dsp";
 import { hann, magnitudeSpectrum } from "./fft";
 
 export const BANDS = [
@@ -312,6 +313,90 @@ export function seamDiscontinuity(buf: Float32Array): number {
   // Compare the wrap step with a prediction from the slope on either side.
   const predicted = buf[n - 1]! + (buf[n - 1]! - buf[n - 2]!);
   return Math.abs(buf[0]! - predicted) / median;
+}
+
+/**
+ * Power spectrum of one or more whole short events (each zero-padded to
+ * `size`, no window: one-shots already start and end at zero), summed. Taking
+ * several takes together shows what stays the same from step to step, which
+ * is what the ear hears as "the pitch" of a repeated sound.
+ */
+export function eventSpectrum(
+  bufs: readonly Float32Array[],
+  size = 8192,
+): Float64Array {
+  const ones = new Float64Array(size).fill(1);
+  const power = new Float64Array(size / 2 + 1);
+  for (const buf of bufs) {
+    const mag = magnitudeSpectrum(buf.subarray(0, size), size, 0, ones);
+    for (let k = 0; k < power.length; k++)
+      power[k] = power[k]! + mag[k]! * mag[k]!;
+  }
+  return power;
+}
+
+export interface TonalPeak {
+  /** How far the peak stands above its neighbourhood, dB. */
+  db: number;
+  freq: number;
+}
+
+/**
+ * The most prominent narrow peak between `lo` and `hi` Hz: each bin's power
+ * (lightly smoothed over 1/48 octave, to tame the scatter of a noise
+ * spectrum) against the mean power from 1/3 octave below to 1/3 octave above,
+ * ignoring 1/12 octave either side of the bin. A pitched partial reads well
+ * above 10 dB; shaped noise reads a few dB.
+ */
+export function tonalPeak(
+  power: Float64Array,
+  sampleRate: number,
+  lo = 120,
+  hi = 8000,
+): TonalPeak {
+  const size = (power.length - 1) * 2;
+  const binHz = sampleRate / size;
+  const prefix = new Float64Array(power.length + 1);
+  for (let k = 0; k < power.length; k++) prefix[k + 1] = prefix[k]! + power[k]!;
+  const sum = (a: number, b: number) => {
+    const i = Math.max(0, Math.min(power.length, a));
+    const j = Math.max(i, Math.min(power.length, b));
+    return { s: prefix[j]! - prefix[i]!, n: j - i };
+  };
+  let best: TonalPeak = { db: -Infinity, freq: 0 };
+  const k0 = Math.max(1, Math.ceil(lo / binHz));
+  const k1 = Math.min(power.length - 2, Math.floor(hi / binHz));
+  for (let k = k0; k <= k1; k++) {
+    const f = k * binHz;
+    const smooth = Math.max(1, Math.round((f * (2 ** (1 / 96) - 1)) / binHz));
+    const centre = sum(k - smooth, k + smooth + 1);
+    const inner = Math.max(2, Math.round((f * (2 ** (1 / 12) - 1)) / binHz));
+    const outerLo = Math.floor(f / 2 ** (1 / 3) / binHz);
+    const outerHi = Math.ceil((f * 2 ** (1 / 3)) / binHz);
+    const below = sum(outerLo, k - inner);
+    const above = sum(k + inner + 1, outerHi + 1);
+    const n = below.n + above.n;
+    if (n === 0 || centre.n === 0) continue;
+    const ref = (below.s + above.s) / n;
+    const v =
+      10 * Math.log10((centre.s / centre.n + 1e-30) / Math.max(ref, 1e-30));
+    if (v > best.db) best = { db: v, freq: f };
+  }
+  return best;
+}
+
+/**
+ * Loudest 50 ms RMS after an approximate K-weighting (the ITU BS.1770
+ * pre-filter: +4 dB shelf above about 1.5 kHz, high-pass near 40 Hz), dB.
+ * Closer to perceived loudness than plain RMS when comparing a dull sound
+ * with a bright one.
+ */
+export function kLoudnessDb(buf: Float32Array, sampleRate: number): number {
+  const x = buf.slice();
+  const shelf = biquad("highshelf", 1500, 0.707, sampleRate, 4);
+  const hp = biquad("hp", 38, 0.5, sampleRate);
+  for (let i = 0; i < x.length; i++) x[i] = hp(shelf(x[i]!));
+  return db(shortTermMaxRms(x, sampleRate));
 }
 
 export interface LoopEnvelopeStats {

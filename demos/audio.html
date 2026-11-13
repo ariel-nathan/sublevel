@@ -63,10 +63,72 @@
         max-width: 900px;
         color: #999;
       }
+      #pick {
+        border: 1px solid #3a5;
+        padding: 4px 12px 12px;
+        max-width: 1100px;
+      }
+      .family {
+        margin: 12px 0 4px;
+        color: #cfc;
+        font-weight: bold;
+      }
+      .cand {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 3px 0;
+        padding: 3px 4px;
+        border: 1px solid transparent;
+      }
+      .cand.selected {
+        border-color: #6c8;
+        background: #1a2a1e;
+      }
+      .cand .label {
+        width: 70px;
+        font-weight: bold;
+      }
+      .cand .desc {
+        flex: 1;
+        color: #aaa;
+      }
+      #report {
+        margin-top: 12px;
+        font-size: 14px;
+      }
+      #report div {
+        margin: 4px 0;
+      }
+      code {
+        color: #ff9;
+      }
     </style>
   </head>
   <body>
     <h3>sublevel audio</h3>
+    <section id="pick">
+      <h4>candidates: pick the best of each family</h4>
+      <p>
+        Footsteps, metal impacts and the crate break each have the rejected
+        design ("current") and three new ones. Clicking any button on a row
+        selects that design and plays it; everything else on this page then uses
+        your selection too. Walks play 8 steps at the game's running cadence and
+        level.
+      </p>
+      <div id="candidates"></div>
+      <div id="report">
+        <div>
+          your picks: <b id="picks"></b>
+          <button id="copy-picks">copy</button>
+        </div>
+        <div>
+          try them in the game: add <code id="sfx"></code> to the game URL
+          <button id="copy-sfx">copy</button>
+        </div>
+      </div>
+    </section>
+    <h4>all sounds</h4>
     <p>
       Every one-shot plays with the gain and pitch the game would use at a soft,
       medium or hard level. Impacts use the game's current mapping or the

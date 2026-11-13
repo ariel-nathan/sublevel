@@ -104,6 +104,146 @@ export const LOUDNESS: Readonly<Record<SoundId, LoudnessTarget>> = {
   ambient_drone: { rmsDb: -26, peakDb: -12 },
 };
 
+// --- Candidate designs (listening round 1, see DESIGN.md) --------------------
+
+/**
+ * Sound families that have several competing designs. "current" is the
+ * design a listener rejected in round 1; A, B and C are the alternatives.
+ */
+export type Family = "footsteps" | "impact_metal" | "crate_break";
+export type Candidate = "current" | "A" | "B" | "C";
+
+export const FAMILIES: readonly Family[] = [
+  "footsteps",
+  "impact_metal",
+  "crate_break",
+];
+export const CANDIDATE_NAMES: readonly Candidate[] = ["current", "A", "B", "C"];
+
+/** The sounds each family's choice switches together. */
+export const FAMILY_SOUNDS: Readonly<Record<Family, readonly SoundId[]>> = {
+  footsteps: ["footstep_concrete", "footstep_tile", "footstep_metal", "land"],
+  impact_metal: ["impact_metal"],
+  crate_break: ["crate_break"],
+};
+
+/**
+ * Which design each family plays by default. The page URL can override it
+ * without a code change: `?sfx=footsteps:B,impact_metal:C,crate_break:A`
+ * (see `parseSfx`). Reasons for these defaults are in DESIGN.md
+ * ("Listening round 1").
+ */
+export const CANDIDATES: Readonly<Record<Family, Candidate>> = {
+  footsteps: "A",
+  impact_metal: "A",
+  crate_break: "A",
+};
+
+export type CandidateSelection = Record<Family, Candidate>;
+
+/** The family a sound belongs to, or null for sounds with one design. */
+export function familyOf(sound: SoundId): Family | null {
+  for (const f of FAMILIES) if (FAMILY_SOUNDS[f].includes(sound)) return f;
+  return null;
+}
+
+/** Short names accepted in `?sfx=` besides the family names themselves. */
+const FAMILY_ALIASES: Readonly<Record<string, Family>> = {
+  footsteps: "footsteps",
+  footstep: "footsteps",
+  steps: "footsteps",
+  impact_metal: "impact_metal",
+  metal: "impact_metal",
+  crate_break: "crate_break",
+  break: "crate_break",
+};
+
+/**
+ * Parses a page query string (`location.search`, with or without the `?`)
+ * for `sfx=family:candidate,...`. Case-insensitive; unknown families or
+ * candidates, and malformed pairs, are ignored. Pure.
+ */
+export function parseSfx(search: string): Partial<CandidateSelection> {
+  const out: Partial<CandidateSelection> = {};
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  for (const part of query.split("&")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    let key: string;
+    let value: string;
+    try {
+      key = decodeURIComponent(part.slice(0, eq).replace(/\+/g, " "));
+      value = decodeURIComponent(part.slice(eq + 1).replace(/\+/g, " "));
+    } catch {
+      continue;
+    }
+    if (key.trim().toLowerCase() !== "sfx") continue;
+    for (const pair of value.split(",")) {
+      const [rawFamily, rawCandidate, ...rest] = pair.split(":");
+      if (rest.length || rawFamily === undefined || rawCandidate === undefined)
+        continue;
+      const family = FAMILY_ALIASES[rawFamily.trim().toLowerCase()];
+      const c = rawCandidate.trim().toLowerCase();
+      const candidate = CANDIDATE_NAMES.find((n) => n.toLowerCase() === c);
+      if (family && candidate) out[family] = candidate;
+    }
+  }
+  return out;
+}
+
+/** The `sfx=` value that reproduces a selection, e.g. "footsteps:B,...". */
+export function formatSfx(selection: CandidateSelection): string {
+  return FAMILIES.map((f) => `${f}:${selection[f]}`).join(",");
+}
+
+/**
+ * Loudness of the new candidates where it departs from `LOUDNESS`.
+ * Footsteps sit lower than the rejected design: a step plays two or three
+ * times a second, the game already halves it, and the old -13 dB forced the
+ * soft limiter to flatten every heel transient by 5-7 dB. Peak ceilings sit
+ * above each design's natural crest so the limiter only catches stray tips.
+ */
+export const CANDIDATE_LOUDNESS: Readonly<
+  Record<
+    Exclude<Candidate, "current">,
+    Partial<Record<SoundId, LoudnessTarget>>
+  >
+> = {
+  A: {
+    footstep_concrete: { rmsDb: -16, peakDb: -3 },
+    footstep_tile: { rmsDb: -16, peakDb: -3 },
+    footstep_metal: { rmsDb: -16, peakDb: -3 },
+    land: { rmsDb: -13, peakDb: -1 },
+    impact_metal: { rmsDb: -10.5, peakDb: -1 },
+    crate_break: { rmsDb: -11.5, peakDb: -1 },
+  },
+  B: {
+    footstep_concrete: { rmsDb: -15, peakDb: -1 },
+    footstep_tile: { rmsDb: -15, peakDb: -1 },
+    footstep_metal: { rmsDb: -15, peakDb: -1 },
+    land: { rmsDb: -12, peakDb: -1 },
+    impact_metal: { rmsDb: -9.5, peakDb: -1 },
+    crate_break: { rmsDb: -11, peakDb: -1 },
+  },
+  C: {
+    footstep_concrete: { rmsDb: -16, peakDb: -3 },
+    footstep_tile: { rmsDb: -16, peakDb: -3 },
+    footstep_metal: { rmsDb: -16, peakDb: -3 },
+    land: { rmsDb: -13, peakDb: -2 },
+    impact_metal: { rmsDb: -11, peakDb: -1 },
+    crate_break: { rmsDb: -14, peakDb: -3 },
+  },
+};
+
+/** Loudness target of a sound as rendered by a candidate design. */
+export function loudnessFor(
+  sound: SoundId,
+  candidate: Candidate,
+): LoudnessTarget {
+  if (candidate === "current") return LOUDNESS[sound];
+  return CANDIDATE_LOUDNESS[candidate][sound] ?? LOUDNESS[sound];
+}
+
 export interface CompressorSettings {
   threshold: number;
   knee: number;
@@ -180,12 +320,22 @@ export function applyEra(
       biquad("lp", cutoff, 0.9, sampleRate),
       biquad("lp", cutoff, 2.5629, sampleRate),
     );
-    // Decimate and re-interpolate linearly.
+    // Decimate and re-interpolate linearly. The decimation reads between
+    // samples (linearly) rather than taking the nearest one: at output rates
+    // that are not a whole multiple of the emulated rate (48 kHz), picking the
+    // nearest sample jitters the timing by up to half a sample, which adds
+    // noise-like distortion (-24 dB at 2 kHz). At 44.1 kHz both are identical.
     const step = sampleRate / era.rate;
     const m = Math.floor((buf.length - 1) / step) + 1;
     const low = new Float32Array(m);
-    for (let k = 0; k < m; k++)
-      low[k] = buf[Math.min(buf.length - 1, Math.round(k * step))]!;
+    const last = buf.length - 1;
+    for (let k = 0; k < m; k++) {
+      const x = k * step;
+      const i0 = Math.min(last, Math.floor(x));
+      const fr = x - i0;
+      const a = buf[i0]!;
+      low[k] = fr > 0 ? a + (buf[Math.min(last, i0 + 1)]! - a) * fr : a;
+    }
     for (let i = 0; i < buf.length; i++) {
       const x = i / step;
       const k = Math.floor(x);
@@ -247,8 +397,8 @@ export function finishSound(
   sampleRate: number,
   loop: boolean,
   era: EraTreatment = ERA,
+  target: LoudnessTarget = LOUDNESS[sound],
 ): Float32Array {
-  const target = LOUDNESS[sound];
   if (loop) {
     let m = 0;
     for (let i = 0; i < raw.length; i++) m += raw[i]!;

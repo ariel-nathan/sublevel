@@ -4,16 +4,33 @@ import { createRng } from "../core/rng";
 import {
   describe as describeSound,
   envelope,
+  eventSpectrum,
+  kLoudnessDb,
   loopEnvelopeStats,
   powerSpectrum,
   seamDiscontinuity,
   shortTermMaxRms,
   spectralPeaks,
+  tonalPeak,
   db,
 } from "./analysis";
 import { fft, hann, magnitudeSpectrum, periodicNoisePair, stft } from "./fft";
-import { renderSound, renderVariant } from "./index";
-import { applyEra, CATEGORY_OF, LOUDNESS, PRIORITY_OF } from "./mix";
+import { candidateOf, renderSound, renderVariant } from "./index";
+import {
+  applyEra,
+  CANDIDATE_NAMES,
+  CANDIDATES,
+  CATEGORY_OF,
+  FAMILIES,
+  FAMILY_SOUNDS,
+  familyOf,
+  formatSfx,
+  LOUDNESS,
+  loudnessFor,
+  parseSfx,
+  PRIORITY_OF,
+  type Candidate,
+} from "./mix";
 import {
   PLASTIC_SHELL_MODES,
   STEEL_DRUM_MODES,
@@ -36,9 +53,15 @@ import {
 } from "./voices";
 
 const RATES = [44100, 48000];
+/**
+ * Footsteps A and C: no narrow peak may stand more than this far above its
+ * neighbourhood (see `tonalPeak`). Shaped noise measures 4-7 dB; the rejected
+ * tile and grate steps measure 19 and 28 dB.
+ */
+const TONAL_LIMIT_DB = 8;
 const LOOPS = new Set<SoundId>(LOOPING_SOUNDS);
 
-/** Expected duration range in seconds. */
+/** Expected duration range in seconds (family sounds: see FAMILY_DURATION). */
 const DURATION: Record<SoundId, [number, number]> = {
   footstep_concrete: [0.08, 0.25],
   footstep_tile: [0.08, 0.25],
@@ -62,16 +85,69 @@ const DURATION: Record<SoundId, [number, number]> = {
   ambient_drone: [5, 12.5],
 };
 
-// Rendering is deterministic, so cache one render per sound and rate.
+/**
+ * Duration ranges of the candidate designs ("current" uses DURATION). The
+ * break ranges are the briefs: B compact (0.3-0.4 s), C up to ~0.9 s.
+ */
+const FAMILY_DURATION: Record<
+  Exclude<Candidate, "current">,
+  Partial<Record<SoundId, [number, number]>>
+> = {
+  A: {
+    footstep_concrete: [0.08, 0.3],
+    footstep_tile: [0.08, 0.3],
+    footstep_metal: [0.08, 0.3],
+    land: [0.15, 0.4],
+    impact_metal: [0.25, 0.6],
+    crate_break: [0.4, 0.7],
+  },
+  B: {
+    footstep_concrete: [0.08, 0.3],
+    footstep_tile: [0.08, 0.3],
+    footstep_metal: [0.08, 0.3],
+    land: [0.15, 0.4],
+    impact_metal: [0.4, 0.85],
+    crate_break: [0.3, 0.4],
+  },
+  C: {
+    footstep_concrete: [0.08, 0.3],
+    footstep_tile: [0.08, 0.3],
+    footstep_metal: [0.08, 0.3],
+    land: [0.15, 0.4],
+    impact_metal: [0.1, 0.3],
+    crate_break: [0.7, 1.0],
+  },
+};
+
+function durationRange(id: SoundId, candidate: Candidate): [number, number] {
+  return candidate === "current"
+    ? DURATION[id]
+    : (FAMILY_DURATION[candidate][id] ?? DURATION[id]);
+}
+
+// Rendering is deterministic, so cache renders per sound, rate, take and design.
 const cache = new Map<string, Float32Array>();
 function render(id: SoundId, sr = 44100): Float32Array {
-  const key = `${id}@${sr}`;
+  return renderTake(id, candidateOf(id), 0, sr);
+}
+function renderTake(
+  id: SoundId,
+  candidate: Candidate,
+  take = 0,
+  sr = 44100,
+): Float32Array {
+  const key = `${id}@${sr}/${candidate}#${take}`;
   let buf = cache.get(key);
   if (!buf) {
-    buf = renderSound(id, sr);
+    buf = renderVariant(id, sr, take, candidate);
     cache.set(key, buf);
   }
   return buf;
+}
+function takes(id: SoundId, candidate: Candidate): Float32Array[] {
+  const out: Float32Array[] = [];
+  for (let v = 0; v < VARIANTS[id]; v++) out.push(renderTake(id, candidate, v));
+  return out;
 }
 
 function stats(buf: Float32Array) {
@@ -119,8 +195,9 @@ describe("renderSound", () => {
         expect(rms).toBeGreaterThan(0.01);
         expect(Math.abs(mean)).toBeLessThan(0.01 * Math.max(peak, 0.1));
         const seconds = buf.length / sr;
-        expect(seconds).toBeGreaterThanOrEqual(DURATION[id][0]);
-        expect(seconds).toBeLessThanOrEqual(DURATION[id][1]);
+        const range = durationRange(id, candidateOf(id));
+        expect(seconds).toBeGreaterThanOrEqual(range[0]);
+        expect(seconds).toBeLessThanOrEqual(range[1]);
         if (!LOOPS.has(id)) {
           for (let i = 0; i < 3; i++) {
             expect(Math.abs(buf[i]!)).toBeLessThan(0.02);
@@ -177,7 +254,7 @@ describe("renderSound", () => {
   test("renders everything quickly", () => {
     const t0 = performance.now();
     for (const id of SOUND_IDS) renderSound(id, 48000);
-    // Typically ~300 ms; generous bound for slow CI machines.
+    // Typically ~200 ms; generous bound for slow CI machines.
     expect(performance.now() - t0).toBeLessThan(1500);
   });
 });
@@ -186,7 +263,7 @@ describe("loudness targets", () => {
   for (const id of SOUND_IDS) {
     test(`${id} meets its ${CATEGORY_OF[id]} target`, () => {
       const buf = render(id);
-      const target = LOUDNESS[id];
+      const target = loudnessFor(id, candidateOf(id));
       const level = LOOPS.has(id)
         ? db(stats(buf).rms)
         : db(shortTermMaxRms(buf, 44100));
@@ -196,12 +273,20 @@ describe("loudness targets", () => {
   }
 
   test("category ordering", () => {
-    const level = (id: SoundId) => LOUDNESS[id].rmsDb;
-    // Hard impacts and breaks above footsteps; footsteps above handling;
-    // ambience below everything.
+    const level = (id: SoundId) => loudnessFor(id, candidateOf(id)).rmsDb;
+    // Hard impacts above footsteps; footsteps above handling; ambience below
+    // everything.
     expect(level("impact_wood")).toBeGreaterThan(level("footstep_concrete"));
-    expect(level("crate_break")).toBeGreaterThanOrEqual(level("impact_wood"));
     expect(level("footstep_concrete")).toBeGreaterThan(level("pickup"));
+    // The rejected break design was set loudest by plain RMS. The new ones
+    // are brighter, so they are compared by K-weighted loudness: a break
+    // still lands at least about as loud as a hard wooden impact.
+    expect(LOUDNESS.crate_break.rmsDb).toBeGreaterThanOrEqual(
+      LOUDNESS.impact_wood.rmsDb,
+    );
+    expect(kLoudnessDb(render("crate_break"), 44100)).toBeGreaterThan(
+      kLoudnessDb(render("impact_wood"), 44100) - 1,
+    );
     for (const id of LOOPING_SOUNDS) {
       for (const other of SOUND_IDS) {
         if (!LOOPS.has(other)) expect(level(id)).toBeLessThan(level(other));
@@ -227,8 +312,9 @@ describe("design targets", () => {
     ["impact_plastic", PLASTIC_SHELL_MODES],
   ];
   for (const [id, modes] of impacts) {
-    test(`${id}: strongest peaks are the designed modes`, () => {
-      const buf = render(id);
+    // Metal: only the rejected modal design has fixed modes to find.
+    test(`${id}: strongest peaks are the designed modes (current design)`, () => {
+      const buf = renderTake(id, "current");
       const peaks = spectralPeaks(
         powerSpectrum(buf, 0, buf.length, 8192),
         44100,
@@ -250,13 +336,17 @@ describe("design targets", () => {
         modeTau(f, MATERIALS.plastic),
       );
     }
-    const decay = (id: SoundId) => describeSound(render(id), 44100).decay40Ms;
+    // The rejected metal design rang for over a second; the new ones are
+    // short on purpose (their own decay ranges are tested under
+    // "candidates"), so the 2x-wood rule holds for "current" only.
+    const decay = (id: SoundId) =>
+      describeSound(renderTake(id, "current"), 44100).decay40Ms;
     expect(decay("impact_metal")).toBeGreaterThan(2 * decay("impact_wood"));
     expect(decay("impact_wood")).toBeGreaterThan(1.5 * decay("impact_plastic"));
   });
 
-  test("footsteps: tile brightest at onset, metal longest and most tonal", () => {
-    const d = (id: SoundId) => describeSound(render(id), 44100);
+  test("footsteps (current design): tile brightest at onset, metal longest and most tonal", () => {
+    const d = (id: SoundId) => describeSound(renderTake(id, "current"), 44100);
     const concrete = d("footstep_concrete");
     const tile = d("footstep_tile");
     const metal = d("footstep_metal");
@@ -336,6 +426,193 @@ describe("design targets", () => {
       const bands = describeSound(render(id), 44100).bands;
       expect(bands.sub).toBeLessThan(0.3);
     }
+  });
+});
+
+describe("candidates (listening round 1)", () => {
+  const NEW = ["A", "B", "C"] as const;
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const desc = (id: SoundId, c: Candidate, take = 0) =>
+    describeSound(renderTake(id, c, take), 44100);
+
+  for (const family of FAMILIES) {
+    for (const c of CANDIDATE_NAMES) {
+      for (const id of FAMILY_SOUNDS[family]) {
+        test(`${id} [${c}]: every take well formed, on target, deterministic`, () => {
+          const target = loudnessFor(id, c);
+          const [lo, hi] = durationRange(id, c);
+          for (let v = 0; v < VARIANTS[id]; v++) {
+            for (const sr of v === 0 ? RATES : [44100]) {
+              const buf = renderTake(id, c, v, sr);
+              for (const x of buf) expect(Number.isFinite(x)).toBe(true);
+              const { peak, mean: m } = stats(buf);
+              expect(peak).toBeLessThanOrEqual(1);
+              expect(db(peak)).toBeLessThanOrEqual(target.peakDb + 0.01);
+              // DC-free (same tolerance as every other sound).
+              expect(Math.abs(m)).toBeLessThan(0.01 * Math.max(peak, 0.1));
+              // Click-free start and end.
+              for (let i = 0; i < 3; i++) {
+                expect(Math.abs(buf[i]!)).toBeLessThan(0.02);
+                expect(Math.abs(buf[buf.length - 1 - i]!)).toBeLessThan(0.02);
+              }
+              const level = db(shortTermMaxRms(buf, sr));
+              expect(Math.abs(level - target.rmsDb)).toBeLessThan(1.5);
+              const seconds = buf.length / sr;
+              expect(seconds).toBeGreaterThanOrEqual(lo);
+              expect(seconds).toBeLessThanOrEqual(hi);
+            }
+          }
+          // Deterministic, and the takes really differ.
+          expect(renderVariant(id, 44100, 0, c)).toEqual(renderTake(id, c));
+          if (VARIANTS[id] > 1)
+            expect(renderTake(id, c, 1)).not.toEqual(renderTake(id, c, 0));
+        });
+      }
+    }
+  }
+
+  test("footsteps A and C have no pitched peak; the rejected design does", () => {
+    // The tonal-peak measure over all takes of a sound: what repeats from
+    // step to step is what the ear hears as a tone in a walk.
+    const tonal = (id: SoundId, c: Candidate) =>
+      tonalPeak(eventSpectrum(takes(id, c)), 44100).db;
+    for (const c of ["A", "C"] as const) {
+      for (const id of FAMILY_SOUNDS.footsteps) {
+        expect(tonal(id, c)).toBeLessThan(TONAL_LIMIT_DB);
+      }
+    }
+    // Sanity: the measure flags the rejected tile and grate steps.
+    expect(tonal("footstep_tile", "current")).toBeGreaterThan(15);
+    expect(tonal("footstep_metal", "current")).toBeGreaterThan(15);
+    expect(tonal("impact_metal", "current")).toBeGreaterThan(15);
+  });
+
+  test("footsteps: soft onsets for A and C, surfaces stay distinct", () => {
+    for (const c of NEW) {
+      const onset = (id: SoundId) =>
+        mean(takes(id, c).map((b) => describeSound(b, 44100).centroidOnset));
+      // Tile is the brighter surface, the grate the longer one.
+      expect(onset("footstep_tile")).toBeGreaterThan(
+        1.1 * onset("footstep_concrete"),
+      );
+      expect(desc("footstep_metal", c).duration).toBeGreaterThanOrEqual(
+        desc("footstep_concrete", c).duration,
+      );
+    }
+    for (const c of ["A", "C"] as const) {
+      for (const id of ["footstep_concrete", "footstep_tile"] as const) {
+        const attack = mean(
+          takes(id, c).map((b) => describeSound(b, 44100).attackMs),
+        );
+        expect(attack).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  test("footstep candidates differ: C darkest, B brightest", () => {
+    const onset = (c: Candidate) =>
+      mean(
+        ["footstep_concrete", "footstep_tile", "footstep_metal"].map(
+          (id) => desc(id as SoundId, c).centroidOnset,
+        ),
+      );
+    expect(onset("B")).toBeGreaterThan(1.3 * onset("A"));
+    expect(onset("A")).toBeGreaterThan(1.5 * onset("C"));
+    // And all three sit well below the rejected design's brightness.
+    expect(onset("current")).toBeGreaterThan(onset("A"));
+  });
+
+  test("metal candidates keep their decay ranges and differ", () => {
+    const d40 = (c: Candidate) =>
+      takes("impact_metal", c).map((b) => describeSound(b, 44100).decay40Ms);
+    for (const v of d40("A")) {
+      expect(v).toBeGreaterThanOrEqual(200);
+      expect(v).toBeLessThanOrEqual(300);
+    }
+    for (const v of d40("B")) {
+      expect(v).toBeGreaterThanOrEqual(300);
+      expect(v).toBeLessThanOrEqual(450);
+    }
+    for (const v of d40("C")) expect(v).toBeLessThan(200);
+    expect(mean(d40("B"))).toBeGreaterThan(1.25 * mean(d40("A")));
+    expect(mean(d40("A"))).toBeGreaterThan(1.6 * mean(d40("C")));
+    // The clank is bright; the drum is dull.
+    expect(desc("impact_metal", "A").centroidOnset).toBeGreaterThan(
+      2 * desc("impact_metal", "B").centroidOnset,
+    );
+    // None rings like the rejected design.
+    for (const c of NEW)
+      expect(mean(d40(c))).toBeLessThan(0.5 * mean(d40("current")));
+  });
+
+  test("break candidates keep their lengths and differ", () => {
+    const dur = (c: Candidate) =>
+      mean(takes("crate_break", c).map((b) => b.length / 44100));
+    expect(dur("B")).toBeLessThan(0.8 * dur("A"));
+    expect(dur("C")).toBeGreaterThan(1.3 * dur("A"));
+    // C is the quietest break.
+    const k = (c: Candidate) =>
+      kLoudnessDb(renderTake("crate_break", c), 44100);
+    expect(k("C")).toBeLessThan(k("A") - 1);
+    expect(k("C")).toBeLessThan(k("B") - 1);
+  });
+
+  test("defaults are new designs, and only they render at start-up", () => {
+    for (const f of FAMILIES) expect(CANDIDATES[f]).not.toBe("current");
+    // The whole default set (every take) renders well within budget.
+    const t0 = performance.now();
+    for (const id of SOUND_IDS)
+      for (let v = 0; v < VARIANTS[id]; v++) renderVariant(id, 48000, v);
+    // Typically ~300 ms; generous bound for slow CI machines.
+    expect(performance.now() - t0).toBeLessThan(1500);
+  });
+});
+
+describe("sfx query", () => {
+  test("parses families and candidates, case-insensitively", () => {
+    expect(parseSfx("?sfx=footsteps:B,impact_metal:C,crate_break:A")).toEqual({
+      footsteps: "B",
+      impact_metal: "C",
+      crate_break: "A",
+    });
+    expect(parseSfx("SFX=Footsteps:b,METAL:current")).toEqual({
+      footsteps: "B",
+      impact_metal: "current",
+    });
+    expect(parseSfx("?harness&sfx=break:c&x=1")).toEqual({ crate_break: "C" });
+    expect(parseSfx("?sfx=footsteps%3AC%2Cmetal%3AB")).toEqual({
+      footsteps: "C",
+      impact_metal: "B",
+    });
+  });
+
+  test("ignores unknown keys, values and malformed pairs", () => {
+    expect(parseSfx("")).toEqual({});
+    expect(parseSfx("?harness")).toEqual({});
+    expect(parseSfx("?sfx=")).toEqual({});
+    expect(parseSfx("?sfx=doors:A,footsteps:D,metal,crate_break:A:B")).toEqual(
+      {},
+    );
+    expect(parseSfx("?sfx=footsteps:A,footsteps:C")).toEqual({
+      footsteps: "C",
+    });
+    expect(parseSfx("?other=footsteps:B")).toEqual({});
+    expect(parseSfx("?sfx=%E0%A4%A")).toEqual({});
+  });
+
+  test("formatSfx round-trips", () => {
+    const s = { footsteps: "B", impact_metal: "C", crate_break: "A" } as const;
+    expect(parseSfx(`?sfx=${formatSfx(s)}`)).toEqual(s);
+    expect(formatSfx(s)).toBe("footsteps:B,impact_metal:C,crate_break:A");
+  });
+
+  test("family membership", () => {
+    expect(familyOf("footstep_tile")).toBe("footsteps");
+    expect(familyOf("land")).toBe("footsteps");
+    expect(familyOf("impact_metal")).toBe("impact_metal");
+    expect(familyOf("crate_break")).toBe("crate_break");
+    expect(familyOf("impact_wood")).toBeNull();
+    expect(candidateOf("impact_wood")).toBe("current");
   });
 });
 
@@ -500,6 +777,35 @@ describe("era treatment", () => {
     const tail = (b: Float32Array) => stats(b.subarray(2000)).rms;
     expect(db(tail(high) / Math.SQRT1_2)).toBeLessThan(-30);
     expect(Math.abs(db(tail(low) / Math.SQRT1_2))).toBeLessThan(1);
+  });
+
+  test("adds no jitter distortion at 48 kHz", () => {
+    // Residual after removing the best-fit sine: what the treatment added.
+    const residualDb = (sr: number, f: number) => {
+      const n = 9600;
+      const s = sine(f, sr, n);
+      applyEra(s, sr, { rate: 22050, amount: 1, bits: 0 });
+      let a = 0;
+      let b = 0;
+      let p = 0;
+      let e = 0;
+      const from = 2000;
+      const to = n - 200;
+      const w = (2 * Math.PI * f) / sr;
+      for (let i = from; i < to; i++) {
+        a += s[i]! * Math.sin(w * i);
+        b += s[i]! * Math.cos(w * i);
+        p += s[i]! * s[i]!;
+      }
+      a = (2 * a) / (to - from);
+      b = (2 * b) / (to - from);
+      for (let i = from; i < to; i++)
+        e += (s[i]! - a * Math.sin(w * i) - b * Math.cos(w * i)) ** 2;
+      return 10 * Math.log10(e / p);
+    };
+    // Nearest-sample decimation left -36 dB at 500 Hz and -24 dB at 2 kHz.
+    expect(residualDb(48000, 500)).toBeLessThan(-50);
+    expect(residualDb(48000, 2000)).toBeLessThan(-33);
   });
 
   test("bit reduction quantises", () => {

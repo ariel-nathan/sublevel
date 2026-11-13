@@ -221,11 +221,20 @@ export function buildDoorMesh(def: DoorDef): MeshData {
 }
 
 export const PLATE_SIDE_TILE = 0.16;
+/** The plate inlay stands this far proud of the floor (never coplanar). */
+export const PLATE_PROUD = 0.006;
+/** ...and is sunk this far below the floor surface, hidden inside it. */
+export const PLATE_EMBED = 0.02;
 
-/** Pressure plate slab centred on the origin: plate top, striped sides. */
+/**
+ * Pressure plate inlay in model space: origin at the centre of the footprint
+ * on the floor surface; the top is PLATE_PROUD above the floor, the part
+ * below is buried in the floor. `size` is the footprint (x, z); its y is
+ * ignored.
+ */
 export function buildPlateMeshes(size: Vec3): MeshData[] {
-  const lo = v3.scale(size, -0.5);
-  const hi = v3.scale(size, 0.5);
+  const lo = v3.create(-size.x / 2, -PLATE_EMBED, -size.z / 2);
+  const hi = v3.create(size.x / 2, PLATE_PROUD, size.z / 2);
   const top = new MeshBuilder("pressure_plate");
   const span = Math.max(size.x, size.z);
   addStretchedBox(top, lo, hi, v(span, 1, span), [

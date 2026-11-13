@@ -20,6 +20,8 @@ import {
   IMPACT_LIT_HEIGHT,
   IMPACT_LIT_RADIUS,
   IMPACT_PLATE_FRONT,
+  PLATE_EMBED,
+  PLATE_PROUD,
 } from "./meshes";
 import { PLATE_SINK } from "./plates";
 
@@ -42,22 +44,19 @@ export function doorSlabAt(def: DoorDef, t: number): FixtureBox {
   };
 }
 
-/** The plate slab as drawn, raised (`pressed` false) or sunk. */
+/** The plate inlay as drawn (a thin box proud of the floor), raised or sunk. */
 export function plateSlabAt(
   def: PressurePlateDef,
   pressed: boolean,
 ): FixtureBox[] {
-  const down = v3.create(0, pressed ? -PLATE_SINK : 0, 0);
+  const floor = def.box.min.y;
+  const top = floor + PLATE_PROUD - (pressed ? PLATE_SINK : 0);
   const box = {
-    min: v3.add(def.box.min, down),
-    max: v3.add(def.box.max, down),
+    min: v3.create(def.box.min.x, floor - PLATE_EMBED, def.box.min.z),
+    max: v3.create(def.box.max.x, top, def.box.max.z),
   };
   return [
-    {
-      owner: `${def.id} top`,
-      box,
-      skip: ["px", "nx", "pz", "nz", "ny"],
-    },
+    { owner: `${def.id} top`, box, skip: ["px", "nx", "pz", "nz", "ny"] },
     { owner: `${def.id} sides`, box, skip: ["py", "ny"] },
   ];
 }

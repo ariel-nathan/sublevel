@@ -271,6 +271,9 @@ export interface RoomModule<P = Record<string, never>> {
   build(ctx: RoomContext, at: Connector, params: P): RoomPlan;
 }
 
+/** A module of any parameter type, for lists of modules. */
+export type AnyRoomModule = RoomModule<any>;
+
 // ---------------------------------------------------------------------------
 // Frames
 // ---------------------------------------------------------------------------

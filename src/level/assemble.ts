@@ -35,6 +35,7 @@ import {
   LIGHT_REACH,
   rectWithin,
   ZONE_REACH,
+  type AnyRoomModule,
   type Connector,
   type Doorway,
   type RoomContext,
@@ -44,8 +45,7 @@ import {
 
 /** One module placed in a level. */
 export interface Placement {
-  // The module's parameter type is checked where the placement is written.
-  module: RoomModule<any>;
+  module: AnyRoomModule;
   /** Instance name, unique in the level. */
   name: string;
   /** Default: the module's defaults. */
@@ -64,6 +64,14 @@ export interface Placement {
    * exit 0 of the placement just before. Ignored for the first placement.
    */
   attach?: { to: number; exit: number };
+}
+
+/** A placement whose parameters are type-checked against its module. */
+export function place<P>(
+  module: RoomModule<P>,
+  placement: Omit<Placement, "module" | "params"> & { params?: P },
+): Placement {
+  return { ...placement, module };
 }
 
 export interface LevelPlan {
@@ -90,7 +98,7 @@ export interface RoomParts {
 
 export interface PlacedRoom {
   name: string;
-  module: RoomModule<unknown>;
+  module: AnyRoomModule;
   /** The connector it was built from (the root anchor for a start module). */
   at: Connector;
   plan: RoomPlan;
@@ -121,7 +129,7 @@ const emptyParts = (): RoomParts => ({
  * building, and gives exactly the plan that building would.
  */
 export function buildRoom(
-  module: RoomModule<any>,
+  module: AnyRoomModule,
   at: Connector,
   options: {
     params?: unknown;
@@ -164,7 +172,7 @@ export function buildRoom(
 
 /** A module's plan for an entry, without keeping what it builds. */
 export function planRoom(
-  module: RoomModule<any>,
+  module: AnyRoomModule,
   at: Connector,
   options: Parameters<typeof buildRoom>[2] = {},
 ): RoomPlan {

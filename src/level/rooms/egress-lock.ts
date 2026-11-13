@@ -27,7 +27,8 @@ export const EGRESS_LOCK_DESIGN: DesignAnchor = {
 };
 
 const LOCK = { a0: 17.9, a1: 20.9, s0: -3.7, s1: -0.7, h: 3 };
-const ENTRY = { s0: -2.9, s1: -1.5, h: 2.4 };
+/** The entry doorway's axis in design space. */
+const AXIS = -2.2;
 
 /** The lock's interior, world space. */
 export function describeEgressLock(at: Connector, mirror = false): Aabb {
@@ -75,7 +76,9 @@ function buildEgressLock(ctx: RoomContext, at: Connector): RoomPlan {
     LOCK.h + W,
     "metal_panel",
   );
-  k.frameX(LOCK.a0, 1, ENTRY.s0, ENTRY.s1, ENTRY.h);
+  // The entry's frame on this side, on the face of the wall that closes the
+  // open end (any doorway that fits the room, framed).
+  k.frameX(LOCK.a0, 1, AXIS - at.width / 2, AXIS + at.width / 2, at.height);
   B(LOCK.a1 - 0.04, 1, -2.7, LOCK.a1, 2, -1.7, "monitor_screen");
   B(19.2, 1, LOCK.s0, 20.2, 2, LOCK.s0 + 0.04, "sign_warning");
   B(19.2, 1, LOCK.s1 - 0.04, 20.2, 2, LOCK.s1, "sign_warning");
@@ -116,7 +119,8 @@ export const EGRESS_LOCK: RoomModule = {
   teaches: "none",
   difficulty: 0,
   requires: {},
-  entrySize: { width: [1.4, 1.4], height: [2.4, 2.4] },
+  // The frame round the entry must fit in the 3 m wide, 3 m high room.
+  entrySize: { width: [1.0, 2.2], height: [2.0, 2.6] },
   defaults: {},
   random: () => ({}),
   build: (ctx, at) => buildEgressLock(ctx, at),

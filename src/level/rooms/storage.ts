@@ -1,8 +1,9 @@
 /**
  * The storage room of Kestrel Annex: a pressure plate holds door B open
  * while 45 kg rest on it. Two wooden crates stacked on it do (the declared
- * solution), and so does the metal crate, too heavy to carry, pushed onto
- * it (`solveBy: "push"`, the same room with the other solution).
+ * solution). The metal crate, too heavy to carry, has a clear push path to
+ * the plate but cannot be pushed onto it: the plate is a 4 cm step that a
+ * sliding crate does not climb (tools/push-check.ts shows it).
  *
  * Design coordinates are the annex's world coordinates; the entry is the
  * corridor's end at (9.55, 0, 7.7) facing +Z, and the room is x 5.5..13.5,
@@ -25,20 +26,11 @@ export const STORAGE_DESIGN: DesignAnchor = {
   facing: { x: 0, y: 0, z: 1 },
 };
 
-export interface StorageParams {
-  /** Which way the declared solution weighs the plate down. */
-  solveBy: "carry" | "push";
-}
-
 const DOOR_B = { lo: 11.3, hi: 12.7, top: 2.4 };
 /** The plate, 1.2 m square, 4.4 m from door B. */
 const PLATE = { x0: 7.9, x1: 9.1, z0: 11.4, z1: 12.6 };
 
-function buildStorage(
-  ctx: RoomContext,
-  at: Connector,
-  params: StorageParams,
-): RoomPlan {
+function buildStorage(ctx: RoomContext, at: Connector): RoomPlan {
   const F = roomFrame(at, ctx.mirror, STORAGE_DESIGN);
   const k = createKit(ctx, F);
   const { box } = k;
@@ -128,7 +120,7 @@ function buildStorage(
   k.prop("crate_weak", 6.9, 1.4, 15.0);
   k.prop("crate_wood", 7.8, 1.4, 15.0);
   // The heavy crate, 3.8 m from the plate with a clear diagonal push path.
-  const metal = k.prop("crate_metal", 11.4, 0, 9.4);
+  k.prop("crate_metal", 11.4, 0, 9.4);
   // Wooden crate on a pallet with a small crate on top.
   k.prop("crate_wood", 12.95, 0.12, 9.2);
   k.prop("crate_wood_small", 12.95, 0.92, 9.2);
@@ -171,29 +163,20 @@ function buildStorage(
   const pc = { x: (PLATE.x0 + PLATE.x1) / 2, z: (PLATE.z0 + PLATE.z1) / 2 };
   const P = (x: number, z: number) => F.point(x, 0, z);
   const centre = (y: number) => F.point(pc.x, y, pc.z);
-  const plateDown: SolutionStep = { do: "wait", for: "plate_down", seconds: 3 };
-  const solution: SolutionStep[] =
-    params.solveBy === "carry"
-      ? [
-          // The top crate of the stack onto the plate, from the south; then
-          // the other on top of it, from the east (the player stays off the
-          // plate: the player weighs it down too).
-          { do: "walk", to: P(10.2, 9.6) },
-          { do: "walk", to: P(10.2, 13.0) },
-          { do: "walk", to: P(8.9, 13.45) },
-          { do: "carry", prop: stackTop, to: centre(0.4) },
-          { do: "walk", to: P(10.4, 13.2) },
-          { do: "walk", to: P(10.4, 12) },
-          { do: "carry", prop: stackBottom, to: centre(1.2) },
-          plateDown,
-          { do: "walk", to: doorwayPoints(exit).before },
-        ]
-      : [
-          { do: "push", prop: metal, to: centre(0.35) },
-          plateDown,
-          { do: "walk", to: P(10.2, 12) },
-          { do: "walk", to: doorwayPoints(exit).before },
-        ];
+  // The top crate of the stack onto the plate, from the south; then the
+  // other on top of it, from the east (the player stays off the plate: the
+  // player weighs it down too).
+  const solution: SolutionStep[] = [
+    { do: "walk", to: P(10.2, 9.6) },
+    { do: "walk", to: P(10.2, 13.0) },
+    { do: "walk", to: P(8.9, 13.45) },
+    { do: "carry", prop: stackTop, to: centre(0.4) },
+    { do: "walk", to: P(10.4, 13.2) },
+    { do: "walk", to: P(10.4, 12) },
+    { do: "carry", prop: stackBottom, to: centre(1.2) },
+    { do: "wait", for: "plate_down", seconds: 3 },
+    { do: "walk", to: doorwayPoints(exit).before },
+  ];
   return {
     footprint: [F.box(5.2, -WALL, 7.7, 13.8, 4.3, 16.3)],
     entry: {
@@ -220,14 +203,13 @@ function buildStorage(
       keys: [
         { prop: stackTop, at: F.point(11.0, 1.2, 15.5) },
         { prop: stackBottom, at: F.point(11.0, 0.4, 15.5) },
-        { prop: metal, at: F.point(11.4, 0.35, 9.4) },
       ],
     },
     solution,
   };
 }
 
-export const STORAGE: RoomModule<StorageParams> = {
+export const STORAGE: RoomModule = {
   name: "storage",
   role: "middle",
   teaches: "weighted-plate",
@@ -236,7 +218,7 @@ export const STORAGE: RoomModule<StorageParams> = {
   // The entry opening is the corridor's whole cross-section, framed by the
   // jambs above; the room's dressing is laid out round exactly that.
   entrySize: { width: [2.5, 2.5], height: [2.8, 2.8] },
-  defaults: { solveBy: "carry" },
-  random: (rng) => ({ solveBy: rng.next() < 0.5 ? "carry" : "push" }),
-  build: buildStorage,
+  defaults: {},
+  random: () => ({}),
+  build: (ctx, at) => buildStorage(ctx, at),
 };

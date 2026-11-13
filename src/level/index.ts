@@ -47,7 +47,11 @@ export function levelAir(data: LevelData): AirGrid {
 export function buildLevel(_options: LevelOptions = {}): BuiltLevel {
   // Generated runs are not implemented yet: every seed gives the hand-built
   // level.
-  const data = defineLevel();
+  return buildLevelFrom(defineLevel());
+}
+
+/** Bakes meshes and colliders for level data (from `assembleLevel`). */
+export function buildLevelFrom(data: LevelData): BuiltLevel {
   const boxes = data.brushes.map(boxOf);
   const air = levelAir(data);
   const baker = new LightBaker(

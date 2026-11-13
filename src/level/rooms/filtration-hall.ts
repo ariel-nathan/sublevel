@@ -444,14 +444,17 @@ function buildFiltrationHall(ctx: RoomContext, at: Connector): RoomPlan {
       keys: [{ prop: wedge, at: L.point(9.7, 0.25, 0.2) }],
     },
     solution: [
-      { do: "walk", to: P(PLATE_FACE - BUTTON_DEPTH - 1.0, 1.0) },
+      // Press from a little way back: from there the line to the doorway
+      // passes the screen's slot between its last two posts.
+      { do: "walk", to: P(9.5, 1.0) },
       { do: "press", button: timed.id },
-      // Through the slot into the doorway, from the main floor: the closing
-      // door meets the crate and reopens.
+      // Through the slot into the doorway, from the main floor: the crate
+      // straddles the slab's path against the far jamb, so the closing
+      // door meets it and reopens, and leaves the doorway's axis free.
       {
         do: "carry",
         prop: wedge,
-        to: L.point(HALL.a1 - 0.2, 0.25, DOOR_T.s1 - 0.45),
+        to: L.point(HALL.a1 - 0.15, 0.25, DOOR_T.s1 - 0.4),
       },
       // Round the near end of the screen and up the lane.
       { do: "walk", to: P(10.4, 0.75) },

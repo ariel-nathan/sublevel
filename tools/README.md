@@ -8,25 +8,31 @@ inputs, same frames, same transcripts.
 
 Pure logic lives in separate modules with unit tests (`*.test.ts`, no browser):
 `pilot-math.ts`, `image.ts`, `lint-core.ts`, `replay-lib.ts`, `cli.ts`, `png.ts`.
+The geometry of solving (where to stand to press, carry, push, throw) is in
+`src/level/rooms/solution.ts`, shared with the room module tests.
 
 ## Commands
 
-| Command                                                                                  | What it does                                                                                                                                                                           | Output                                                                                                                                                             |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bun run e2e`                                                                            | Full playthrough with assertions. Exit 1 on any failed check. About 2 s.                                                                                                               | transcript and PASS/FAIL list on stdout; `out/e2e/*.png` milestone frames, `out/e2e/sheet.png` contact sheet, `out/e2e/08-exit-alcove-page.png` full page with HUD |
-| `bun run tour [--only s] [--view v] [--out dir]`                                         | Renders ~36 named viewpoints (every room, doors closed then open). `--only` = name substring; `--view` = `none\|coverage\|material\|depth\|normals\|lighting`; default out `out/tour`. | `out/tour/<name>.png`, `out/tour/sheet-N.png` (3 columns, labelled `NN name`, 12 per sheet), index of grid positions on stdout                                     |
-| `bun run tour --diff <dirA> <dirB> [--out dir]`                                          | Compares two tour outputs view by view.                                                                                                                                                | table of changed-pixel % on stdout; `out/tour-diff/diff-sheet-N.png` rows of `A \| B \| difference x8`, worst first                                                |
-| `bun tools/lint-visual.ts [--only s] [--out dir]`                                        | Detects z-fighting and geometry holes from every viewpoint in both door states (~7 s). Exit 1 if anything is flagged.                                                                  | summary table and cluster bounding boxes on stdout; `out/lint/<view>-<doors>-shimmer.png` (flagged pixels red, clusters boxed), `...-holes.png`                    |
-| `bun tools/replay.ts <file.json> [--every N] [--from s] [--to s] [--view v] [--out dir]` | Reproduces a replay saved with F8 in normal play.                                                                                                                                      | `out/replay/<step>.png` every N steps (default 30), `out/replay/sheet-N.png` filmstrips labelled `STEP n`; stdout: position over time, event log with step numbers |
-| `bun tools/replay.ts <file.json> --at <step> [--window 20]`                              | Saves every frame from step-window to step+window.                                                                                                                                     | same                                                                                                                                                               |
+| Command                                                                                  | What it does                                                                                                                                                                                                     | Output                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun run e2e`                                                                            | Full playthrough of Kestrel Annex by hand-written steps, with assertions (timer, wedge, real input...). Exit 1 on any failed check. About 3 s.                                                                   | transcript and PASS/FAIL list on stdout; `out/e2e/*.png` milestone frames, `out/e2e/sheet*.png` contact sheets, `out/e2e/14-exit-page.png` full page with HUD      |
+| `bun run solve [--seed N] [--verbose]`                                                   | Plays ANY level from its declared `LevelData.solution` alone (`solve.ts`, steps carried out by `solver.ts`) and checks it ends finished. Exit 1 naming the failed step. About 5 s.                               | transcript and PASS/FAIL on stdout; `out/solve/end.png`, or `out/solve/fail-step-N.png`                                                                            |
+| `bun tools/push-check.ts`                                                                | Proves the solver's `push` step: plays to the storage room and pushes the 60 kg metal crate out from the shelves and up to the plate (not onto it: the plate is a 4 cm step).                                    | transcript; `out/push-check/end.png`                                                                                                                               |
+| `bun tools/room-plan.ts [module\|annex] [--facing +x\|-x\|+z\|-z] [--mirror] [--seed N]` | Top-down plan of a room module (default: every registered module) or of Kestrel Annex, without a browser.                                                                                                        | `out/room-plan/<name>.png`: brushes grey by height, props orange, buttons yellow, doors cyan, plates magenta, footprint red, doorways green, solution path blue    |
+| `bun run tour [--only s] [--view v] [--out dir]`                                         | Renders 64 named viewpoints (every room; each view states whether doors are closed or open). `--only` = name substring; `--view` = `none\|coverage\|material\|depth\|normals\|lighting`; default out `out/tour`. | `out/tour/<name>.png`, `out/tour/sheet-N.png` (3 columns, labelled `NN name`, 12 per sheet), index of grid positions on stdout                                     |
+| `bun run tour --diff <dirA> <dirB> [--out dir]`                                          | Compares two tour outputs view by view.                                                                                                                                                                          | table of changed-pixel % on stdout; `out/tour-diff/diff-sheet-N.png` rows of `A \| B \| difference x8`, worst first                                                |
+| `bun tools/lint-visual.ts [--only s] [--out dir]`                                        | Detects z-fighting and geometry holes from every viewpoint in both door states (~7 s). Exit 1 if anything is flagged.                                                                                            | summary table and cluster bounding boxes on stdout; `out/lint/<view>-<doors>-shimmer.png` (flagged pixels red, clusters boxed), `...-holes.png`                    |
+| `bun tools/replay.ts <file.json> [--every N] [--from s] [--to s] [--view v] [--out dir]` | Reproduces a replay saved with F8 in normal play.                                                                                                                                                                | `out/replay/<step>.png` every N steps (default 30), `out/replay/sheet-N.png` filmstrips labelled `STEP n`; stdout: position over time, event log with step numbers |
+| `bun tools/replay.ts <file.json> --at <step> [--window 20]`                              | Saves every frame from step-window to step+window.                                                                                                                                                               | same                                                                                                                                                               |
 
 Viewpoints (name, position, yaw, pitch, door state) are the table `VIEWS` in
 `views.ts`; add a line there to extend both the tour and the lint.
 
 ### Visual lint, how to read it
 
-`bun tools/lint-visual.ts [--only s] [--out dir]` takes about 7 s for all 72
-view-states. Exit code 0: nothing flagged; 1: something flagged; 2: the tool
+`bun tools/lint-visual.ts [--only s] [--out dir]` checks all 128
+view-states (64 viewpoints, doors closed and open; tens of seconds to a few
+minutes depending on the machine). Exit code 0: nothing flagged; 1: something flagged; 2: the tool
 itself failed. Output: one table line per viewpoint (closed and open doors),
 then bounding boxes of anything flagged. Annotated images
 (`out/lint/<view>-<doors>-shimmer.png`, `...-holes.png`) are written only for
@@ -124,8 +130,25 @@ Pilot actions (all deterministic, built on `__harness.step`):
   does not stand on a plate. Carry height follows view pitch; the pilot sets it
   before walking so the body does not sweep through other props.
 - `pressButtonAt(x, y, z, from?)`: walks within 1.2 m, presses use, checks for
-  a `button_press` event.
+  a `button_press` event. `pressHere(x, y, z)`: the same without walking.
+- `holdOver(x, y, z, settle?)`: turns so the held body hangs at that point
+  (as nearly as the hold distance allows); `release(wait?)` lets go of it.
+- `throwAt(x, y, z)`: faces the point and throws the held body with the
+  pitch solved for a ballistic arc from where it hangs (speed by mass).
+- `setDown(x, y, z, stand, pitchDeg)`: tilts to `pitchDeg` first (so the body
+  is carried at that height), walks straight to `stand`, faces the point and
+  lets go; returns where the body came to rest. The solver gets `stand` and
+  the pitch from `carryPlan` (src/level/rooms/solution.ts).
+- `pushTo(bodyId, x, z, approach, tolerance)`: stands behind a body
+  (`approach(position)` says where) and walks into it towards the point, a
+  stretch at a time, re-approaching when it drifts; returns its final position.
+- `waitForEvent(what, match, maxSteps?)`: idles until a matching event.
 - `frame(name)` saves the exact rendered frame; `page(name)` the whole page with HUD.
+
+`Solver` (`solver.ts`) carries out `SolutionStep`s with these: `await
+Solver.create(session, pilot)` (before any step, to map prop spawn indices to
+body ids), then `await solver.run(step)` returns null or what went wrong. The
+file's header says exactly how each kind of step is done.
 
 Raw access: `session.evaluate("__harness.step(30, { moveZ: 1 })")`, `__game.physics`,
 `__game.physics.setBodyPose(id, {x, y, z})` (teleport a body), `__harness.setCamera`,
@@ -138,10 +161,15 @@ without writing a file), `setPose`, `setDebugView`.
 
 ## Facts a scenario writer needs
 
-- Level: lab x -4..4, z -3..3; door A at x 4..4.3 (z -0.7..0.7); corridor to
-  (9.55, z 0..7); storage x 5.5..13.5, z 8..16; plate x 7.9..9.1, z 11.4..12.6
-  (45 kg, a crate on it counts, and so does the player); door B at x 13.5;
-  exit alcove x > 13.8.
+- Level (Kestrel Annex; `bun tools/room-plan.ts annex` draws it): lab
+  x -4..4, z -3..3; door A at x 4..4.3 (z -0.7..0.7); corridor to (9.55,
+  z 0..7); storage x 5.5..13.5, z 8..16; plate x 7.9..9.1, z 11.4..12.6 (45 kg,
+  a crate on it counts, and so does the player); door B at x 13.5..13.8;
+  filtration hall x 14.1..25.1, z 8..16 (timed button at (25.02, 1.2, 13),
+  door T at x 25.1..25.4, z 8.9..10.9, at the end of the lane behind the
+  screen); valve chamber x 25.4..31.4 (impact target at (31.31, 4.2, 9.8),
+  exit door at x 31.4..31.7); egress lock with the exit box x 32.7..34.7,
+  z 8.3..11.3. `__game.level.data.solution` is a known way through.
 - Run speed 5.6 m/s = 0.093 m per step; reach 2.2 m; carry limit 40 kg;
   held crates hover about 1.24 m ahead of the eye.
 - The harness step count is `state().step`; events carry the step they happened on.

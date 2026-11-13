@@ -61,6 +61,8 @@ export interface BodyInfo {
 
 export interface PilotState {
   step: number;
+  /** True once the player has reached the exit. */
+  finished: boolean;
   player: {
     feet: Point3;
     velocity: Point3;
@@ -629,6 +631,171 @@ export class Pilot {
       `pitch ${f(pitch, 1)} speed ${f(speed, 1)}`,
     );
     return true;
+  }
+
+  // --- Generic actions for the solver (tools/solve.ts) ----------------------
+
+  /**
+   * Looks at a button within reach from where the pilot stands, presses use
+   * and checks for a `button_press` event. Does not walk.
+   */
+  async pressHere(x: number, y: number, z: number): Promise<boolean> {
+    await this.lookAt(x, y, z, true);
+    const before = (await this.state()).step;
+    await this.raw(1, { usePressed: true });
+    await this.raw(3);
+    const pressed = (await this.events(before - 1)).some(
+      (e) => e.type === "button_press",
+    );
+    await this.note(
+      `pressHere(${f(x)}, ${f(y)}, ${f(z)})`,
+      pressed ? "pressed" : "NO button_press event",
+    );
+    return pressed;
+  }
+
+  /**
+   * Sets the held body down so that it comes to rest at (x, y, z): tilts the
+   * view so the body hangs at `holdY` before walking (so it is carried at
+   * that height), walks straight to `stand`, faces the point, lets the body
+   * settle and lets go. Returns where the body came to rest, or null if
+   * nothing was held or it could not be let go.
+   */
+  async setDown(
+    x: number,
+    y: number,
+    z: number,
+    stand: Point2,
+    pitchDeg: number,
+  ): Promise<Point3 | null> {
+    const start = await this.state();
+    const held = start.player.heldBody;
+    if (held === null) {
+      this.log("setDown: nothing held");
+      return null;
+    }
+    const toward = lookToward(start.player.feet, {
+      x: stand.x,
+      y: 0,
+      z: stand.z,
+    });
+    await this.look(toward.yawDeg, pitchDeg, true);
+    await this.raw(10);
+    const walk = await this.walkTo(stand.x, stand.z, {
+      direct: true,
+      tolerance: 0.1,
+    });
+    if (!walk.arrived) {
+      return null;
+    }
+    const eye = await this.eye();
+    await this.look(lookToward(eye, { x, y: eye.y, z }).yawDeg, pitchDeg, true);
+    await this.raw(20);
+    await this.raw(1, { usePressed: true });
+    await this.raw(45);
+    const body = (await this.bodies()).find((b) => b.id === held);
+    const after = (await this.state()).player.heldBody;
+    await this.note(
+      `setDown(${f(x)}, ${f(y)}, ${f(z)})`,
+      `rests at ${body ? fmt(body.position) : "?"}${after === null ? "" : " STILL HELD"}`,
+    );
+    return after === null && body ? body.position : null;
+  }
+
+  /**
+   * Pushes a body that is too heavy to carry until its centre is within
+   * `tolerance` of (x, z): stands behind it on the far side from the target
+   * (`approach(position)` says where), faces the target and walks into it,
+   * a short stretch at a time, re-approaching whenever it drifts off line.
+   * Returns the body's final position.
+   */
+  async pushTo(
+    bodyId: number,
+    x: number,
+    z: number,
+    approach: (at: Point2) => Point2,
+    tolerance: number,
+    maxRounds = 12,
+  ): Promise<Point3 | null> {
+    const bodyAt = async (): Promise<Point3 | null> =>
+      (await this.bodies()).find((b) => b.id === bodyId)?.position ?? null;
+    for (let round = 0; round < maxRounds; round++) {
+      const p = await bodyAt();
+      if (!p) return null;
+      const left = horizontalDistance(p, { x, z });
+      if (left <= tolerance) {
+        await this.note(
+          `pushTo(#${bodyId}, ${f(x)}, ${f(z)})`,
+          `rests at ${fmt(p)}`,
+        );
+        return p;
+      }
+      // Behind the body, coming round its side if it is in the way.
+      const behind = approach(p);
+      const feet = (await this.state()).player.feet;
+      const ux = (x - p.x) / left;
+      const uz = (z - p.z) / left;
+      const ahead = (feet.x - p.x) * ux + (feet.z - p.z) * uz;
+      if (ahead > -0.3) {
+        // The pilot is beside or in front of it: go round the side it is on.
+        const side = (feet.x - p.x) * -uz + (feet.z - p.z) * ux >= 0 ? 1 : -1;
+        const out = 1.0;
+        await this.walkTo(
+          p.x - uz * side * out + ux * Math.max(ahead, 0),
+          p.z + ux * side * out + uz * Math.max(ahead, 0),
+          { direct: true, tolerance: 0.2 },
+        );
+        await this.walkTo(
+          behind.x - uz * side * out,
+          behind.z + ux * side * out,
+          { direct: true, tolerance: 0.2 },
+        );
+      }
+      const reached = await this.walkTo(behind.x, behind.z, {
+        direct: true,
+        tolerance: 0.12,
+      });
+      if (!reached.arrived) {
+        this.log(`pushTo: could not get behind #${bodyId}`);
+      }
+      // Walk into it towards the target for up to 1.2 m, re-aiming at the
+      // target through the body's current centre.
+      const startStep = (await this.state()).step;
+      for (let i = 0; i < 40; i++) {
+        const q = await bodyAt();
+        if (!q) return null;
+        const rest = horizontalDistance(q, { x, z });
+        if (rest <= tolerance * 0.6) break;
+        const me = (await this.state()).player.feet;
+        // Off line: the pilot no longer stands behind the body.
+        const vx = (x - q.x) / rest;
+        const vz = (z - q.z) / rest;
+        const lateral = Math.abs((me.x - q.x) * -vz + (me.z - q.z) * vx);
+        if (lateral > 0.3) break;
+        const eye = await this.eye();
+        const aim = lookToward(eye, {
+          x: q.x + vx * 2,
+          y: eye.y,
+          z: q.z + vz * 2,
+        });
+        const turn = lookDelta(
+          { yawDeg: (await this.state()).player.yawDeg, pitchDeg: 0 },
+          { yawDeg: aim.yawDeg, pitchDeg: 0 },
+        );
+        await this.raw(4, {
+          moveZ: clamp(rest / 0.8, 0.35, 1),
+          lookDx: turn.dx,
+        });
+        if ((await this.state()).step - startStep > 240) break;
+      }
+      await this.raw(30);
+    }
+    const end = await bodyAt();
+    await this.note(
+      `pushTo(#${bodyId}, ${f(x)}, ${f(z)})`,
+      `GAVE UP at ${end ? fmt(end) : "?"}`,
+    );
+    return end;
   }
 
   private holdDistance(state: PilotState, held: number): number {

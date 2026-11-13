@@ -15,6 +15,8 @@ six modules (`define.ts`); a generator will chain modules from a seed.
 | `rooms/corridor.ts`                 | The reference parametric module: a plain corridor                                                    |
 | `rooms/lab.ts` ... `egress-lock.ts` | Kestrel Annex's six modules                                                                          |
 | `rooms/contract.test.ts`            | The contract, checked for every registered module in 8 orientations                                  |
+| `rooms/puzzles/`                    | The library of parametric puzzle rooms (see "Puzzle rooms")                                          |
+| `dev.ts`                            | `buildRoomsLevel`: development levels from module names (`?rooms=`)                                  |
 | `assemble.ts`                       | `assembleLevel(plan)`, `buildRoom`, `planRoom`, `place`                                              |
 | `define.ts`                         | `KESTREL_ANNEX`, the hand-built level's plan                                                         |
 | `fingerprint.ts`                    | Hashes of the built level; `fingerprint.json` pins Kestrel Annex                                     |
@@ -152,9 +154,68 @@ Add the module to `rooms/registry.ts`. Then:
 - Assembling a chain with it (see `assemble.test.ts`) checks the level-wide
   rules: sealed (voxel flood and rays from the spawn), no coplanar faces,
   props supported, solution walkable from spawn to exit.
-- In the game: only once the generator is wired (`?seed=N`), then
-  `bun tools/solve.ts --seed N` plays its solution, and tour / lint /
-  coverage look at it.
+- In the game: `?rooms=my-room` (see "Development levels" below) builds
+  the lab, your module and an exit. To play it with the solver bot:
+  `bun src/level/rooms/puzzles/prove.ts my-room --seeds 0,1,2,3`; and
+  `bun src/level/rooms/puzzles/look.ts my-room --seed 0 [--view coverage]`
+  renders viewpoints in it. Once the generator is wired (`?seed=N`),
+  `bun tools/solve.ts --seed N` plays a whole run.
+
+## Puzzle rooms
+
+`rooms/puzzles/` is the library the generator chains: each module is a
+parametric room in the shell of `shell.ts` (`buildShell`: a rectangular
+room in `LOCAL_DESIGN`, walled at both doorways, the standard exit
+doorway 1.6 x 2.4 m in the far or a side wall, optionally with a door
+that slides into that wall, extra `holes` for alcoves, and a timed
+way-back button for the previous module's door), dressed with `dress.ts`.
+Every puzzle room takes entries of 1.4-1.8 x 2.2-2.6 m (`ENTRY_SIZE`) and
+leaves by the standard doorway. Each file's header has its layout, its
+puzzle and its softlock analysis; `puzzles.test.ts` checks what makes each
+one a puzzle and what makes it solvable across its parameter range, and
+`levels.test.ts` checks sealing, z-fighting, props and lights in assembled
+development levels.
+
+| Module             | Mechanic                             | Difficulty |
+| ------------------ | ------------------------------------ | ---------- |
+| `records-office`   | toggle button behind a counter       | 1          |
+| `goods-bay`        | weighted plate, gather light props   | 1          |
+| `parts-store`      | weighted plate, fetch from a store   | 2          |
+| `freight-passage`  | push the metal crate out of a tunnel | 1          |
+| `generator-hall`   | impact target high across open floor | 2          |
+| `fan-room`         | impact target through a window       | 3          |
+| `pump-gallery`     | timed door, wedge it through a hatch | 2          |
+| `decon-lock`       | plate holds door 1, timed door 2     | 3          |
+| `exit-lock`        | finish (walled entry, exit box)      | 0          |
+| `maintenance-loft` | climb a crate staircase (pending)    | 2          |
+
+`PENDING_MODULES` (the loft) are complete rooms whose solution needs a step
+the format lacks (climbing onto props: a `walk` is on brush floor only, so
+`verifySolution` and the bot cannot do it); they are not in the registry
+and the generator must not use them. Their solutions write a climb as a
+`walk` whose target is higher than the feet, which `prove.ts` plays as a
+walk holding jump.
+
+Things learned writing them: a carry is one straight walk from where the
+prop is picked up to where it is let go, so carrying round a corner takes
+two carries (set it down on the way); the verifier sizes props by their
+spawn yaw for good, so set-down spots approached diagonally can overlap a
+prop set down before (approach along an axis); `wait` counts events since
+the previous step began, so put it straight after the step that causes
+the event; the bot's `setDown` tilts the view before stepping back, which
+drags a crate picked off a ledge into the ledge (put props to fetch on
+floors, or tell the tools).
+
+## Development levels
+
+`buildRoomsLevel(rooms, seed)` (`dev.ts`, `?rooms=a,b&seed=N` in the game):
+the lab, then each named module (any registered or pending middle module)
+behind a connecting corridor, then a corridor and the exit lock. Each
+module gets random parameters from the seed, or its defaults for
+`name!default`; `name@mirror` mirrors it. Corridors are picked from a
+fixed list (straight, then bends back towards +X, lengths 3-10 m) as the
+first that keeps every footprint apart; if none fits, the assembler's
+overlap error is thrown. Same names and seed, same level.
 
 ## The assembler
 

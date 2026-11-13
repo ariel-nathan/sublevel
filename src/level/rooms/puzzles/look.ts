@@ -155,7 +155,17 @@ try {
   const items = [];
   for (const s of shots) {
     await setPose(session, s);
-    items.push({ label: s.label, image: await grabFrame(session) });
+    const image = await grabFrame(session);
+    items.push({ label: s.label, image });
+    if (view === "coverage") {
+      // Pure magenta: nothing drawn there (a hole).
+      let holes = 0;
+      for (let i = 0; i < image.rgba.length; i += 4) {
+        const [r, g, b] = [image.rgba[i], image.rgba[i + 1], image.rgba[i + 2]];
+        if (r === 255 && g === 0 && b === 255) holes++;
+      }
+      console.log(`${s.label}: ${holes} hole pixels`);
+    }
   }
   const sheets = contactSheets(items, { cols: 3, rows: 3 });
   for (const [i, sheet] of sheets.entries()) {

@@ -170,11 +170,13 @@ async function lintSeed(seed: number, outRoot: string): Promise<number> {
       views.push(...viewsAt(`${room.name}~${next?.name ?? "x"}`, e.connector));
     });
   });
-  const session = await launchGame({
-    query: `harness&seed=${seed}`,
-    width: 480,
-    height: 270,
-  });
+  // The default window, as tools/lint-visual.ts uses: at a smaller one the
+  // frames are rendered at a lower internal resolution, where the edges of
+  // small fixtures a few centimetres proud of a wall (a button's knob and
+  // bezel, seen from 1 m) move by a pixel with the 1-3 mm jitter and are
+  // flagged, since such relief is too shallow to show in the depth and
+  // normals views that explain edge aliasing.
+  const session = await launchGame({ query: `harness&seed=${seed}` });
   let flaggedCount = 0;
   try {
     const name = await session.evaluate<string>("__game.level.data.name");

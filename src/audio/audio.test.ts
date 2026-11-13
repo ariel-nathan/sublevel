@@ -1,10 +1,37 @@
 import { describe, expect, test } from "bun:test";
 import { LOOPING_SOUNDS, SOUND_IDS, type SoundId } from "../core/api";
-import { renderSound } from "./index";
+import { createRng } from "../core/rng";
 import {
-  createVoiceLimiter,
+  describe as describeSound,
+  envelope,
+  loopEnvelopeStats,
+  powerSpectrum,
+  seamDiscontinuity,
+  shortTermMaxRms,
+  spectralPeaks,
+  db,
+} from "./analysis";
+import { fft, hann, magnitudeSpectrum, periodicNoisePair, stft } from "./fft";
+import { renderSound, renderVariant } from "./index";
+import { applyEra, CATEGORY_OF, LOUDNESS, PRIORITY_OF } from "./mix";
+import {
+  PLASTIC_SHELL_MODES,
+  STEEL_DRUM_MODES,
+  WOOD_CRATE_MODES,
+  modeTau,
+  MATERIALS,
+  type Mode,
+} from "./modal";
+import { VARIANTS } from "./recipes";
+import {
+  ATTENUATION,
+  PRIORITY,
   clampGain,
   clampPitch,
+  createVoiceLimiter,
+  distanceCutoff,
+  distanceGain,
+  distanceSend,
   makeImpulseResponse,
 } from "./voices";
 
@@ -13,27 +40,39 @@ const LOOPS = new Set<SoundId>(LOOPING_SOUNDS);
 
 /** Expected duration range in seconds. */
 const DURATION: Record<SoundId, [number, number]> = {
-  footstep_concrete: [0.12, 0.2],
-  footstep_tile: [0.12, 0.2],
-  footstep_metal: [0.12, 0.25],
-  land: [0.2, 0.3],
-  jump: [0.1, 0.15],
-  impact_wood: [0.2, 0.3],
-  impact_metal: [0.3, 0.5],
-  impact_plastic: [0.12, 0.2],
-  crate_break: [0.5, 0.7],
-  pickup: [0.08, 0.12],
-  throw: [0.15, 0.25],
-  button_press: [0.12, 0.18],
-  button_deny: [0.2, 0.3],
-  door_open: [0.8, 1.0],
-  door_close: [0.8, 1.0],
-  plate_down: [0.15, 0.25],
-  plate_up: [0.15, 0.25],
-  hum_fluorescent: [2, 4],
-  hum_machine: [2, 4],
-  ambient_drone: [2, 4],
+  footstep_concrete: [0.08, 0.25],
+  footstep_tile: [0.08, 0.25],
+  footstep_metal: [0.2, 0.4],
+  land: [0.15, 0.35],
+  jump: [0.1, 0.2],
+  impact_wood: [0.25, 0.45],
+  impact_metal: [0.8, 1.3],
+  impact_plastic: [0.08, 0.2],
+  crate_break: [0.6, 1.0],
+  pickup: [0.08, 0.16],
+  throw: [0.2, 0.3],
+  button_press: [0.12, 0.35],
+  button_deny: [0.3, 0.5],
+  door_open: [1.3, 1.7],
+  door_close: [1.3, 1.7],
+  plate_down: [0.15, 0.35],
+  plate_up: [0.15, 0.35],
+  hum_fluorescent: [5, 12.5],
+  hum_machine: [5, 12.5],
+  ambient_drone: [5, 12.5],
 };
+
+// Rendering is deterministic, so cache one render per sound and rate.
+const cache = new Map<string, Float32Array>();
+function render(id: SoundId, sr = 44100): Float32Array {
+  const key = `${id}@${sr}`;
+  let buf = cache.get(key);
+  if (!buf) {
+    buf = renderSound(id, sr);
+    cache.set(key, buf);
+  }
+  return buf;
+}
 
 function stats(buf: Float32Array) {
   let peak = 0;
@@ -45,18 +84,6 @@ function stats(buf: Float32Array) {
     sq += v * v;
   }
   return { peak, mean: sum / buf.length, rms: Math.sqrt(sq / buf.length) };
-}
-
-/** Energy of the first difference relative to total energy: a cheap brightness measure. */
-function brightness(buf: Float32Array): number {
-  let d = 0;
-  let e = 0;
-  for (let i = 1; i < buf.length; i++) {
-    const x = buf[i]! - buf[i - 1]!;
-    d += x * x;
-    e += buf[i]! * buf[i]!;
-  }
-  return d / e;
 }
 
 function goertzel(buf: Float32Array, freq: number, sampleRate: number): number {
@@ -72,11 +99,18 @@ function goertzel(buf: Float32Array, freq: number, sampleRate: number): number {
   return Math.sqrt(s1 * s1 + s2 * s2 - c * s1 * s2) / buf.length;
 }
 
+function sine(freq: number, sr: number, n: number, amp = 1): Float32Array {
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++)
+    out[i] = amp * Math.sin((2 * Math.PI * freq * i) / sr);
+  return out;
+}
+
 describe("renderSound", () => {
   for (const sr of RATES) {
     for (const id of SOUND_IDS) {
       test(`${id} @ ${sr} is well formed`, () => {
-        const buf = renderSound(id, sr);
+        const buf = render(id, sr);
         expect(buf.length).toBeGreaterThan(0);
         for (const v of buf) expect(Number.isFinite(v)).toBe(true);
         const { peak, mean, rms } = stats(buf);
@@ -102,7 +136,7 @@ describe("renderSound", () => {
   for (const sr of RATES) {
     for (const id of LOOPING_SOUNDS) {
       test(`${id} @ ${sr} loops seamlessly`, () => {
-        const buf = renderSound(id, sr);
+        const buf = render(id, sr);
         const n = buf.length;
         let maxStep = 0;
         let maxSlopeChange = 0;
@@ -121,22 +155,159 @@ describe("renderSound", () => {
         );
         expect(wrapSlope).toBeLessThanOrEqual(maxSlopeChange);
         expect(wrapSlope2).toBeLessThanOrEqual(maxSlopeChange);
+        expect(seamDiscontinuity(buf)).toBeLessThan(3);
       });
     }
   }
 
-  test("spectral sanity", () => {
-    const metal = brightness(renderSound("impact_metal", 44100));
-    const concrete = brightness(renderSound("footstep_concrete", 44100));
-    expect(metal).toBeGreaterThan(concrete * 3);
-    expect(brightness(renderSound("footstep_tile", 44100))).toBeGreaterThan(
-      concrete,
+  test("variants are deterministic, distinct and well formed", () => {
+    for (const id of SOUND_IDS) {
+      for (let v = 1; v < VARIANTS[id]; v++) {
+        const a = renderVariant(id, 44100, v);
+        expect(renderVariant(id, 44100, v)).toEqual(a);
+        expect(a).not.toEqual(render(id));
+        const { peak } = stats(a);
+        expect(peak).toBeLessThanOrEqual(1);
+        expect(Math.abs(a[0]!)).toBeLessThan(0.02);
+        expect(Math.abs(a[a.length - 1]!)).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  test("renders everything quickly", () => {
+    const t0 = performance.now();
+    for (const id of SOUND_IDS) renderSound(id, 48000);
+    // Typically ~300 ms; generous bound for slow CI machines.
+    expect(performance.now() - t0).toBeLessThan(1500);
+  });
+});
+
+describe("loudness targets", () => {
+  for (const id of SOUND_IDS) {
+    test(`${id} meets its ${CATEGORY_OF[id]} target`, () => {
+      const buf = render(id);
+      const target = LOUDNESS[id];
+      const level = LOOPS.has(id)
+        ? db(stats(buf).rms)
+        : db(shortTermMaxRms(buf, 44100));
+      expect(Math.abs(level - target.rmsDb)).toBeLessThan(1.5);
+      expect(db(stats(buf).peak)).toBeLessThanOrEqual(target.peakDb + 0.01);
+    });
+  }
+
+  test("category ordering", () => {
+    const level = (id: SoundId) => LOUDNESS[id].rmsDb;
+    // Hard impacts and breaks above footsteps; footsteps above handling;
+    // ambience below everything.
+    expect(level("impact_wood")).toBeGreaterThan(level("footstep_concrete"));
+    expect(level("crate_break")).toBeGreaterThanOrEqual(level("impact_wood"));
+    expect(level("footstep_concrete")).toBeGreaterThan(level("pickup"));
+    for (const id of LOOPING_SOUNDS) {
+      for (const other of SOUND_IDS) {
+        if (!LOOPS.has(other)) expect(level(id)).toBeLessThan(level(other));
+      }
+    }
+  });
+
+  test("debris has the lowest voice priority", () => {
+    expect(PRIORITY_OF.impact).toBe(PRIORITY.debris);
+    expect(PRIORITY_OF.footstep).toBe(PRIORITY.player);
+    expect(PRIORITY_OF.door).toBeGreaterThan(PRIORITY_OF.impact);
+  });
+});
+
+describe("design targets", () => {
+  /** True if `freq` is within `tolerance` (relative) of some designed mode. */
+  const nearMode = (freq: number, modes: readonly Mode[], tolerance = 0.03) =>
+    modes.some((m) => Math.abs(freq - m.freq) / m.freq < tolerance);
+
+  const impacts: [SoundId, readonly Mode[]][] = [
+    ["impact_wood", WOOD_CRATE_MODES],
+    ["impact_metal", STEEL_DRUM_MODES],
+    ["impact_plastic", PLASTIC_SHELL_MODES],
+  ];
+  for (const [id, modes] of impacts) {
+    test(`${id}: strongest peaks are the designed modes`, () => {
+      const buf = render(id);
+      const peaks = spectralPeaks(
+        powerSpectrum(buf, 0, buf.length, 8192),
+        44100,
+        6,
+        15,
+        100,
+      );
+      const hits = peaks.filter((p) => nearMode(p.freq, modes)).length;
+      expect(hits).toBeGreaterThanOrEqual(5);
+    });
+  }
+
+  test("modal decay: metal > wood > plastic, at every mode frequency", () => {
+    for (const f of [200, 500, 1000, 2000]) {
+      expect(modeTau(f, MATERIALS.steel)).toBeGreaterThan(
+        3 * modeTau(f, MATERIALS.wood),
+      );
+      expect(modeTau(f, MATERIALS.wood)).toBeGreaterThan(
+        modeTau(f, MATERIALS.plastic),
+      );
+    }
+    const decay = (id: SoundId) => describeSound(render(id), 44100).decay40Ms;
+    expect(decay("impact_metal")).toBeGreaterThan(2 * decay("impact_wood"));
+    expect(decay("impact_wood")).toBeGreaterThan(1.5 * decay("impact_plastic"));
+  });
+
+  test("footsteps: tile brightest at onset, metal longest and most tonal", () => {
+    const d = (id: SoundId) => describeSound(render(id), 44100);
+    const concrete = d("footstep_concrete");
+    const tile = d("footstep_tile");
+    const metal = d("footstep_metal");
+    expect(tile.centroidOnset).toBeGreaterThan(concrete.centroidOnset * 1.15);
+    expect(concrete.centroidOnset).toBeGreaterThan(metal.centroidOnset);
+    expect(metal.decay40Ms).toBeGreaterThan(2 * concrete.decay40Ms);
+    expect(metal.decay40Ms).toBeGreaterThan(2 * tile.decay40Ms);
+    expect(metal.flatness).toBeLessThan(concrete.flatness / 5);
+    expect(metal.flatness).toBeLessThan(tile.flatness / 5);
+    // All three sit below impacts in level and cut through with a sharp attack.
+    for (const s of [concrete, tile, metal]) expect(s.attackMs).toBeLessThan(3);
+  });
+
+  test("door open peaks at the start (release), close at the end (seal)", () => {
+    const loudestAt = (id: SoundId) => {
+      const env = envelope(render(id), 44100, 0.01, 0.05);
+      let best = 0;
+      for (let i = 0; i < env.length; i++) if (env[i]! > env[best]!) best = i;
+      return best / env.length;
+    };
+    expect(loudestAt("door_open")).toBeLessThan(0.15);
+    expect(loudestAt("door_close")).toBeGreaterThan(0.65);
+    // The close's seal is a heavier, lower thud than the open's latch.
+    const tail = (id: SoundId) => {
+      const buf = render(id);
+      const from = Math.round(buf.length * 0.7);
+      return describeSound(buf.subarray(from), 44100);
+    };
+    expect(tail("door_close").rms50Db).toBeGreaterThan(
+      tail("door_open").rms50Db + 3,
     );
   });
 
-  test("fluorescent hum is strongest near mains frequency", () => {
+  test("plate_down is lower pitched than plate_up", () => {
+    const d = (id: SoundId) => describeSound(render(id), 44100).centroid;
+    expect(d("plate_down")).toBeLessThan(d("plate_up"));
+  });
+
+  test("button_deny is lower and rougher than button_press", () => {
+    const d = (id: SoundId) => describeSound(render(id), 44100);
+    expect(d("button_deny").centroidTail).toBeLessThan(
+      d("button_press").centroidTail,
+    );
+    expect(d("button_deny").decay20Ms).toBeGreaterThan(
+      d("button_press").decay20Ms,
+    );
+  });
+
+  test("fluorescent hum is strongest at twice the mains frequency", () => {
     const sr = 44100;
-    const buf = renderSound("hum_fluorescent", sr);
+    const buf = render("hum_fluorescent", sr);
     const candidates = [30, 50, 60, 80, 100, 120, 180, 240, 300, 360, 480, 600];
     let best = 0;
     let bestMag = -1;
@@ -150,16 +321,192 @@ describe("renderSound", () => {
     expect([100, 120]).toContain(best);
   });
 
-  test("plate_down is lower pitched than plate_up", () => {
-    expect(brightness(renderSound("plate_down", 44100))).toBeLessThan(
-      brightness(renderSound("plate_up", 44100)),
-    );
+  for (const id of LOOPING_SOUNDS) {
+    test(`${id} does not expose its loop length`, () => {
+      const stats = loopEnvelopeStats(render(id), 44100);
+      // No swell once (or two or three times) per loop deeper than 5%...
+      expect(stats.loopModulation).toBeLessThan(0.05);
+      // ...and no discrete events standing out of the texture.
+      expect(stats.spreadDb).toBeLessThan(4);
+    });
+  }
+
+  test("ambience has no sub-heavy drone", () => {
+    for (const id of LOOPING_SOUNDS) {
+      const bands = describeSound(render(id), 44100).bands;
+      expect(bands.sub).toBeLessThan(0.3);
+    }
+  });
+});
+
+describe("fft", () => {
+  test("transform of a bin-centred sine", () => {
+    const n = 256;
+    const re = new Float64Array(n);
+    const im = new Float64Array(n);
+    for (let i = 0; i < n; i++) re[i] = Math.cos((2 * Math.PI * 10 * i) / n);
+    fft(re, im);
+    for (let k = 0; k < n; k++) {
+      const mag = Math.hypot(re[k]!, im[k]!);
+      if (k === 10 || k === n - 10) expect(mag).toBeCloseTo(n / 2, 6);
+      else expect(mag).toBeLessThan(1e-6);
+    }
   });
 
-  test("renders everything quickly", () => {
-    const t0 = performance.now();
-    for (const id of SOUND_IDS) renderSound(id, 48000);
-    expect(performance.now() - t0).toBeLessThan(1500);
+  test("inverse round trip", () => {
+    const rng = createRng(3);
+    const n = 1024;
+    const re = new Float64Array(n);
+    const im = new Float64Array(n);
+    const orig = new Float64Array(n);
+    for (let i = 0; i < n; i++) orig[i] = re[i] = rng.next() - 0.5;
+    fft(re, im);
+    fft(re, im, true);
+    for (let i = 0; i < n; i++) {
+      expect(re[i]! / n).toBeCloseTo(orig[i]!, 9);
+      expect(im[i]! / n).toBeCloseTo(0, 9);
+    }
+  });
+
+  test("rejects non-power-of-two lengths", () => {
+    expect(() => fft(new Float64Array(100), new Float64Array(100))).toThrow();
+  });
+
+  test("hann window", () => {
+    const w = hann(8);
+    expect(w[0]).toBe(0);
+    expect(w[4]).toBeCloseTo(1, 12);
+    expect(w[1]).toBeCloseTo(w[7]!, 12);
+  });
+
+  test("magnitude spectrum reads a full-scale sine as ~0 dB at its frequency", () => {
+    const sr = 48000;
+    const size = 1024;
+    const freq = (100 * sr) / size; // bin-centred
+    const mag = magnitudeSpectrum(sine(freq, sr, size), size);
+    expect(mag[100]).toBeCloseTo(1, 2);
+    expect(mag[300]).toBeLessThan(1e-3);
+  });
+
+  test("stft tracks a frequency change over time", () => {
+    const sr = 16000;
+    const half = 8000;
+    const buf = new Float32Array(2 * half);
+    buf.set(sine(500, sr, half), 0);
+    buf.set(sine(3000, sr, half), half);
+    const spec = stft(buf, sr, 512, 256);
+    const peakBin = (frame: Float64Array) => {
+      let b = 0;
+      for (let k = 0; k < frame.length; k++) if (frame[k]! > frame[b]!) b = k;
+      return (b * sr) / 512;
+    };
+    expect(Math.abs(peakBin(spec.frames[5]!) - 500)).toBeLessThan(40);
+    expect(
+      Math.abs(peakBin(spec.frames[spec.frames.length - 5]!) - 3000),
+    ).toBeLessThan(40);
+    expect(spec.frames[5]![Math.round((500 * 512) / sr)]!).toBeGreaterThan(-3);
+  });
+
+  test("periodic noise follows its spectral shape and wraps without a seam", () => {
+    const rng = createRng(9);
+    const n = 1 << 14;
+    const sr = 16000;
+    const [a, b] = periodicNoisePair(
+      () => rng.next(),
+      n,
+      sr,
+      (f) => (f > 1000 && f < 2000 ? 1 : 0),
+      () => 1,
+    );
+    expect(stats(a).rms).toBeCloseTo(1, 3);
+    expect(stats(b).rms).toBeCloseTo(1, 3);
+    const p = powerSpectrum(a, 0, n, 1024);
+    let inBand = 0;
+    let total = 0;
+    for (let k = 0; k < p.length; k++) {
+      const f = (k * sr) / 1024;
+      total += p[k]!;
+      if (f > 900 && f < 2100) inBand += p[k]!;
+    }
+    expect(inBand / total).toBeGreaterThan(0.97);
+    expect(seamDiscontinuity(a)).toBeLessThan(3);
+  });
+});
+
+describe("analysis", () => {
+  test("spectral peaks find two sines", () => {
+    const sr = 44100;
+    const n = 16384;
+    const buf = sine(440, sr, n);
+    const other = sine(1330, sr, n, 0.5);
+    for (let i = 0; i < n; i++) buf[i] = buf[i]! + other[i]!;
+    const peaks = spectralPeaks(powerSpectrum(buf, 0, n, 8192), sr, 2);
+    expect(Math.abs(peaks[0]!.freq - 440)).toBeLessThan(2);
+    expect(Math.abs(peaks[1]!.freq - 1330)).toBeLessThan(2);
+    expect(peaks[0]!.db - peaks[1]!.db).toBeCloseTo(6, 0);
+  });
+
+  test("attack, decay and level of a known envelope", () => {
+    const sr = 44100;
+    const n = sr;
+    const buf = new Float32Array(n);
+    // 20 ms linear rise, then exponential decay with tau 50 ms.
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      const env = t < 0.02 ? t / 0.02 : Math.exp(-(t - 0.02) / 0.05);
+      buf[i] = env * Math.sin(2 * Math.PI * 2000 * t);
+    }
+    const d = describeSound(buf, sr);
+    expect(d.attackMs).toBeGreaterThan(13);
+    expect(d.attackMs).toBeLessThan(19);
+    // -20 dB after tau * ln(10) = 115 ms; -40 dB after 230 ms.
+    expect(Math.abs(d.decay20Ms - 115)).toBeLessThan(8);
+    expect(Math.abs(d.decay40Ms - 230)).toBeLessThan(10);
+    expect(Math.abs(d.centroid - 2000)).toBeLessThan(80);
+    expect(d.bands.highMid).toBeGreaterThan(0.9);
+  });
+
+  test("seam discontinuity", () => {
+    const n = 44100;
+    const whole = sine(100, 44100, n); // exactly 100 cycles
+    expect(seamDiscontinuity(whole)).toBeLessThan(1);
+    const broken = sine(100.25, 44100, n);
+    expect(seamDiscontinuity(broken)).toBeGreaterThan(10);
+  });
+
+  test("loop envelope stats detect a once-per-loop swell", () => {
+    const rng = createRng(4);
+    const n = 44100 * 4;
+    const flat = new Float32Array(n);
+    const swell = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = rng.next() * 2 - 1;
+      flat[i] = x;
+      swell[i] = x * (1 + 0.5 * Math.sin((2 * Math.PI * i) / n));
+    }
+    expect(loopEnvelopeStats(flat, 44100).loopModulation).toBeLessThan(0.02);
+    expect(loopEnvelopeStats(swell, 44100).loopModulation).toBeGreaterThan(0.3);
+  });
+});
+
+describe("era treatment", () => {
+  test("removes content above the emulated Nyquist frequency", () => {
+    const sr = 44100;
+    const n = sr / 2;
+    const high = sine(15000, sr, n);
+    const low = sine(1000, sr, n);
+    applyEra(high, sr, { rate: 22050, amount: 1, bits: 0 });
+    applyEra(low, sr, { rate: 22050, amount: 1, bits: 0 });
+    const tail = (b: Float32Array) => stats(b.subarray(2000)).rms;
+    expect(db(tail(high) / Math.SQRT1_2)).toBeLessThan(-30);
+    expect(Math.abs(db(tail(low) / Math.SQRT1_2))).toBeLessThan(1);
+  });
+
+  test("bit reduction quantises", () => {
+    const buf = sine(1000, 44100, 1000);
+    applyEra(buf, 44100, { rate: 0, amount: 1, bits: 4 });
+    const levels = new Set(Array.from(buf).map((v) => v.toFixed(6)));
+    expect(levels.size).toBeLessThanOrEqual(17);
   });
 });
 
@@ -173,6 +520,32 @@ describe("clamping", () => {
     expect(clampPitch(0)).toBe(0.25);
     expect(clampPitch(50)).toBe(4);
     expect(clampPitch(1.1)).toBe(1.1);
+  });
+});
+
+describe("distance model", () => {
+  test("full level near, silent at max, monotonic between", () => {
+    for (const a of Object.values(ATTENUATION)) {
+      expect(distanceGain(0, a)).toBe(1);
+      expect(distanceGain(a.ref, a)).toBe(1);
+      expect(distanceGain(a.max, a)).toBe(0);
+      expect(distanceGain(a.max + 5, a)).toBe(0);
+      let last = 1;
+      for (let d = 0; d < a.max; d += 0.25) {
+        const g = distanceGain(d, a);
+        expect(g).toBeLessThanOrEqual(last);
+        last = g;
+      }
+      expect(distanceCutoff(0, a)).toBe(20000);
+      expect(distanceCutoff(a.max, a)).toBeCloseTo(2500, 6);
+      // Wetter with distance: the send falls slower than the dry level.
+      expect(distanceSend(8, a)).toBeGreaterThan(distanceGain(8, a));
+    }
+  });
+
+  test("a hum 10 m away is faint; an impact 10 m away is clearly audible", () => {
+    expect(db(distanceGain(10, ATTENUATION.ambience))).toBeLessThan(-25);
+    expect(db(distanceGain(10, ATTENUATION.world))).toBeGreaterThan(-22);
   });
 });
 
@@ -208,6 +581,28 @@ describe("voice limiter", () => {
     expect(l.active).toBe(4);
   });
 
+  test("debris never steals the player's sounds; the player steals debris", () => {
+    const l = createVoiceLimiter(3, 0);
+    const steps: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const d = l.request(`step${i}`, 0.1, 0, 1, PRIORITY.player);
+      if (d.play) steps.push(d.id);
+    }
+    expect(l.request("crash", 1, 0.01, 1, PRIORITY.debris)).toEqual({
+      play: false,
+      reason: "full",
+    });
+    const l2 = createVoiceLimiter(3, 0);
+    const debris: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const d = l2.request(`crate${i}`, 1, 0, 1, PRIORITY.debris);
+      if (d.play) debris.push(d.id);
+    }
+    const step = l2.request("step", 0.05, 0.01, 1, PRIORITY.player);
+    expect(step.play).toBe(true);
+    if (step.play) expect(debris).toContain(step.steal!);
+  });
+
   test("expired and released voices free slots", () => {
     const l = createVoiceLimiter(2, 0);
     const a = l.request("a", 1, 0, 0.1);
@@ -220,10 +615,10 @@ describe("voice limiter", () => {
 });
 
 describe("impulse response", () => {
-  test("shape", () => {
+  test("shape: pre-delay, decaying energy, highs die first, no ringing", () => {
     const sr = 44100;
-    const [left, right] = makeImpulseResponse(sr, 0.8);
-    expect(left.length).toBe(Math.round(sr * 0.8));
+    const [left, right] = makeImpulseResponse(sr);
+    expect(left.length).toBe(Math.round(sr * 1.1));
     expect(left).not.toEqual(right);
     const energy = (b: Float32Array, from: number, to: number) => {
       let e = 0;
@@ -232,12 +627,25 @@ describe("impulse response", () => {
     };
     for (const ch of [left, right]) {
       for (const v of ch) expect(Number.isFinite(v)).toBe(true);
-      expect(ch[0]).toBe(0);
+      // Silent pre-delay.
+      for (let i = 0; i < Math.round(sr * 0.008); i++) expect(ch[i]).toBe(0);
       const q = ch.length >> 2;
       expect(energy(ch, 0, q)).toBeGreaterThan(energy(ch, q, 2 * q));
       expect(energy(ch, q, 2 * q)).toBeGreaterThan(energy(ch, 3 * q, 4 * q));
       expect(energy(ch, 0, ch.length)).toBeCloseTo(1, 3);
+      // Later in the tail, the spectrum is darker than early on.
+      const early = describeSound(
+        ch.subarray(Math.round(sr * 0.03), Math.round(sr * 0.15)),
+        sr,
+      );
+      const late = describeSound(
+        ch.subarray(Math.round(sr * 0.4), Math.round(sr * 0.6)),
+        sr,
+      );
+      expect(late.centroid).toBeLessThan(early.centroid);
+      // Dense, not metallic: no narrow peaks standing out of the tail spectrum.
+      expect(early.flatness).toBeGreaterThan(0.3);
     }
-    expect(makeImpulseResponse(sr, 0.8)[0]).toEqual(left);
+    expect(makeImpulseResponse(sr)[0]).toEqual(left);
   });
 });

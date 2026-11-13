@@ -11,18 +11,34 @@
         color: #ccc;
         font: 13px monospace;
       }
-      #buttons {
+      h4 {
+        margin: 18px 0 6px;
+        color: #8c8;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 3px 0;
+      }
+      .name {
+        width: 160px;
+      }
+      .cat {
+        width: 80px;
+        color: #888;
+      }
+      .bar {
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
-        margin: 12px 0;
         max-width: 900px;
       }
       button {
         background: #222;
         color: #ddd;
         border: 1px solid #444;
-        padding: 6px 10px;
+        padding: 4px 10px;
         font: inherit;
         cursor: pointer;
       }
@@ -41,31 +57,60 @@
         display: block;
         margin-top: 12px;
         border: 1px solid #333;
+        max-width: 100%;
+      }
+      p {
+        max-width: 900px;
+        color: #999;
       }
     </style>
   </head>
   <body>
     <h3>sublevel audio</h3>
-    <div>click a sound; loops toggle</div>
-    <div id="buttons"></div>
-    <label
-      >master
-      <input id="master" type="range" min="0" max="1.5" step="0.01" value="1"
-    /></label>
-    <label
-      >gain
-      <input id="gain" type="range" min="0" max="3" step="0.01" value="1" />
-      <span id="gainv"></span
-    ></label>
-    <label
-      >pitch
-      <input id="pitch" type="range" min="0.5" max="2" step="0.01" value="1" />
-      <span id="pitchv"></span
-    ></label>
-    <label
-      ><input id="positional" type="checkbox" /> positional (circles the
-      listener)</label
-    >
+    <p>
+      Every one-shot plays with the gain and pitch the game would use at a soft,
+      medium or hard level. Impacts use the game's current mapping or the
+      proposed one. Positional sounds play 3 m ahead and to the left. Loops sit
+      at the origin; the distance slider moves the listener away from them (the
+      hum should be faint by 10 m and gone by 16 m).
+    </p>
+    <div>
+      <label
+        >master
+        <input id="master" type="range" min="0" max="1.5" step="0.01" value="1"
+      /></label>
+      <label><input id="reverb" type="checkbox" checked /> room reverb</label>
+      <label
+        ><input id="positional" type="checkbox" checked /> positional world
+        sounds</label
+      >
+      <label
+        >impact mapping
+        <select id="mapping">
+          <option value="current">current game</option>
+          <option value="recommended">recommended</option>
+        </select></label
+      >
+    </div>
+    <h4>one-shots</h4>
+    <div id="sounds"></div>
+    <h4>sequences</h4>
+    <div id="walks" class="bar"></div>
+    <h4>loops</h4>
+    <div class="bar" id="loops"></div>
+    <div>
+      <label
+        >listener distance
+        <input
+          id="distance"
+          type="range"
+          min="0.5"
+          max="18"
+          step="0.5"
+          value="2" />
+        <span id="distancev"></span
+      ></label>
+    </div>
     <div id="status"></div>
     <canvas id="wave" width="800" height="160"></canvas>
     <script type="module" src="../src/audio/demo.ts"></script>

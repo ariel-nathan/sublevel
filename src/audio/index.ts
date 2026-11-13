@@ -4,6 +4,7 @@
  */
 import {
   LOOPING_SOUNDS,
+  SOUND_IDS,
   type AudioSystem,
   type LoopHandle,
   type PlayOptions,
@@ -11,41 +12,75 @@ import {
 } from "../core/api";
 import { createRng, hashString } from "../core/rng";
 import type { Vec3 } from "../math";
-import { RECIPES } from "./recipes";
 import {
+  BUSES,
+  CATEGORY_OF,
+  PRIORITY_OF,
+  finishSound,
+  type CompressorSettings,
+} from "./mix";
+import { RECIPES, VARIANTS } from "./recipes";
+import {
+  ATTENUATION,
   clampGain,
   clampPitch,
   createVoiceLimiter,
+  distanceCutoff,
+  distanceGain,
+  distanceSend,
   makeImpulseResponse,
+  type Attenuation,
   type VoiceLimiter,
 } from "./voices";
 
-/** Level of the reverb send relative to the dry signal (dry is always 1). */
-export const REVERB_WET_LEVEL = 0.16;
-const REVERB_SECONDS = 0.8;
-const PANNER_REF_DISTANCE = 1.5;
-const PANNER_MAX_DISTANCE = 30;
-const PANNER_ROLLOFF = 1.2;
-const LOOP_FADE_OUT = 0.05;
+const LOOPING = new Set<SoundId>(LOOPING_SOUNDS);
 
 /** Synthesises the mono waveform for a sound. Pure and deterministic. */
 export function renderSound(sound: SoundId, sampleRate: number): Float32Array {
-  const recipe = RECIPES[sound];
-  return recipe({ sr: sampleRate, rng: createRng(hashString(sound)) });
+  return renderVariant(sound, sampleRate, 0);
 }
 
-const LOOPING = new Set<SoundId>(LOOPING_SOUNDS);
+/**
+ * Synthesises take `variant` (0..VARIANTS[sound]-1) of a sound. Take 0 is
+ * `renderSound`. Pure and deterministic.
+ */
+export function renderVariant(
+  sound: SoundId,
+  sampleRate: number,
+  variant: number,
+): Float32Array {
+  const seed = hashString(variant === 0 ? sound : `${sound}#${variant}`);
+  const raw = RECIPES[sound]({
+    sr: sampleRate,
+    rng: createRng(seed),
+    variant,
+  });
+  return finishSound(sound, raw, sampleRate, LOOPING.has(sound));
+}
+
+/** Extra controls beyond the game contract, used by the demo page. */
+export interface AudioDebugControls {
+  /** Turns the room reverb on or off. */
+  setReverbEnabled(on: boolean): void;
+}
+
+interface Chain {
+  source: AudioBufferSourceNode;
+  /** Level set by the caller (and fades). */
+  gain: GainNode;
+  /** Distance attenuation, updated as the listener moves. */
+  distance: GainNode | null;
+  filter: BiquadFilterNode | null;
+  send: GainNode;
+  position: Vec3 | null;
+  attenuation: Attenuation;
+  sendLevel: number;
+}
 
 interface LoopEntry {
   sound: SoundId;
   options: PlayOptions;
-  source: AudioBufferSourceNode | null;
-  gain: GainNode | null;
-}
-
-interface Voice {
-  source: AudioBufferSourceNode;
-  gain: GainNode;
+  chain: Chain | null;
 }
 
 function webAudioConstructor(): typeof AudioContext | undefined {
@@ -56,18 +91,30 @@ function webAudioConstructor(): typeof AudioContext | undefined {
   return g.AudioContext ?? g.webkitAudioContext;
 }
 
-export function createAudioSystem(): AudioSystem {
+function configure(node: DynamicsCompressorNode, s: CompressorSettings): void {
+  node.threshold.value = s.threshold;
+  node.knee.value = s.knee;
+  node.ratio.value = s.ratio;
+  node.attack.value = s.attack;
+  node.release.value = s.release;
+}
+
+export function createAudioSystem(): AudioSystem & AudioDebugControls {
   let ctx: AudioContext | null = null;
-  let masterIn: GainNode | null = null;
   let masterOut: GainNode | null = null;
-  let dryBus: GainNode | null = null;
+  let sfxBus: GainNode | null = null;
+  let ambienceBus: GainNode | null = null;
   let reverbIn: GainNode | null = null;
+  let reverbReturn: GainNode | null = null;
+  let reverbOn = true;
   let masterGainValue = 1;
-  const buffers = new Map<SoundId, AudioBuffer>();
-  const voices = new Map<number, Voice>();
+  const buffers = new Map<string, AudioBuffer>();
+  const voices = new Map<number, Chain>();
   const loops = new Map<number, LoopEntry>();
   const limiter: VoiceLimiter = createVoiceLimiter();
+  const takeCounter = new Map<SoundId, number>();
   let nextLoopId = 1;
+  let prerenderQueued = false;
   const listener = {
     position: { x: 0, y: 0, z: 0 } as Vec3,
     forward: { x: 0, y: 0, z: -1 } as Vec3,
@@ -95,57 +142,114 @@ export function createAudioSystem(): AudioSystem {
     }
   }
 
+  function distanceTo(p: Vec3): number {
+    const l = listener.position;
+    return Math.hypot(p.x - l.x, p.y - l.y, p.z - l.z);
+  }
+
+  /** Sets a chain's distance-dependent parameters (immediately or smoothly). */
+  function applyDistance(chain: Chain, smooth: boolean): void {
+    if (!ctx || !chain.position || !chain.distance || !chain.filter) return;
+    const d = distanceTo(chain.position);
+    const g = distanceGain(d, chain.attenuation);
+    const f = distanceCutoff(d, chain.attenuation);
+    const s = chain.sendLevel * distanceSend(d, chain.attenuation);
+    const t = ctx.currentTime;
+    if (smooth) {
+      chain.distance.gain.setTargetAtTime(g, t, 0.05);
+      chain.filter.frequency.setTargetAtTime(f, t, 0.05);
+      chain.send.gain.setTargetAtTime(s, t, 0.05);
+    } else {
+      chain.distance.gain.value = g;
+      chain.filter.frequency.value = f;
+      chain.send.gain.value = s;
+    }
+  }
+
   function buildGraph(context: AudioContext): void {
-    masterIn = context.createGain();
     masterOut = context.createGain();
-    masterOut.gain.value = masterGainValue;
-    const comp = context.createDynamicsCompressor();
-    comp.threshold.value = -14;
-    comp.knee.value = 12;
-    comp.ratio.value = 6;
-    comp.attack.value = 0.003;
-    comp.release.value = 0.15;
-    masterIn.connect(comp);
-    comp.connect(masterOut);
+    masterOut.gain.value = masterGainValue * BUSES.master;
+    const mix = context.createGain();
+    const safety = context.createDynamicsCompressor();
+    configure(safety, BUSES.limiter);
+    mix.connect(safety);
+    safety.connect(masterOut);
     masterOut.connect(context.destination);
 
-    dryBus = context.createGain();
-    dryBus.connect(masterIn);
+    sfxBus = context.createGain();
+    const glue = context.createDynamicsCompressor();
+    configure(glue, BUSES.sfxCompressor);
+    sfxBus.connect(glue);
+    glue.connect(mix);
+
+    ambienceBus = context.createGain();
+    ambienceBus.connect(mix);
 
     reverbIn = context.createGain();
-    reverbIn.gain.value = REVERB_WET_LEVEL;
+    reverbReturn = context.createGain();
+    reverbReturn.gain.value = reverbOn ? 1 : 0;
     const convolver = context.createConvolver();
-    const [left, right] = makeImpulseResponse(
-      context.sampleRate,
-      REVERB_SECONDS,
-    );
+    const [left, right] = makeImpulseResponse(context.sampleRate);
     const ir = context.createBuffer(2, left.length, context.sampleRate);
     ir.copyToChannel(left as Float32Array<ArrayBuffer>, 0);
     ir.copyToChannel(right as Float32Array<ArrayBuffer>, 1);
+    convolver.normalize = false;
     convolver.buffer = ir;
     reverbIn.connect(convolver);
-    convolver.connect(masterIn);
+    convolver.connect(reverbReturn);
+    reverbReturn.connect(mix);
   }
 
-  function bufferFor(sound: SoundId): AudioBuffer | null {
+  function bufferFor(sound: SoundId, variant: number): AudioBuffer | null {
     if (!ctx) return null;
-    let buf = buffers.get(sound);
+    const key = `${sound}#${variant}`;
+    let buf = buffers.get(key);
     if (!buf) {
-      const data = renderSound(sound, ctx.sampleRate);
+      const data = renderVariant(sound, ctx.sampleRate, variant);
       buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
       buf.copyToChannel(data as Float32Array<ArrayBuffer>, 0);
-      buffers.set(sound, buf);
+      buffers.set(key, buf);
     }
     return buf;
   }
 
-  /** Builds source -> gain -> (panner) -> buses. Returns the nodes, not yet started. */
+  /** Renders every take in the background, one per task, after start-up. */
+  function queuePrerender(): void {
+    if (prerenderQueued) return;
+    prerenderQueued = true;
+    const jobs: [SoundId, number][] = [];
+    for (const sound of SOUND_IDS) {
+      for (let v = 0; v < VARIANTS[sound]; v++) jobs.push([sound, v]);
+    }
+    const step = () => {
+      const job = jobs.shift();
+      if (!job) return;
+      bufferFor(job[0], job[1]);
+      setTimeout(step, 0);
+    };
+    setTimeout(step, 0);
+  }
+
+  /** Next take of a sound: cycles through all takes, never repeating the last. */
+  function nextTake(sound: SoundId): number {
+    const count = VARIANTS[sound];
+    if (count <= 1) return 0;
+    const n = (takeCounter.get(sound) ?? -1) + 1;
+    takeCounter.set(sound, n);
+    // A fixed scrambled order so consecutive steps do not form a pattern.
+    const order = [0, 2, 1, 3, 1, 0, 3, 2, 0, 1, 2, 3];
+    return order[n % order.length]! % count;
+  }
+
+  /** Builds source -> gain -> [distance -> filter -> panner] -> bus (+ send). */
   function makeChain(
     context: AudioContext,
     buffer: AudioBuffer,
     options: PlayOptions,
     loop: boolean,
-  ): { source: AudioBufferSourceNode; gain: GainNode } {
+    attenuation: Attenuation,
+    sendLevel: number,
+  ): Chain {
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.loop = loop;
@@ -154,13 +258,21 @@ export function createAudioSystem(): AudioSystem {
     gain.gain.value = clampGain(options.gain);
     source.connect(gain);
     let out: AudioNode = gain;
+    let distance: GainNode | null = null;
+    let filter: BiquadFilterNode | null = null;
+    const send = context.createGain();
+    send.gain.value = sendLevel;
     if (options.position) {
+      distance = context.createGain();
+      filter = context.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.Q.value = 0.5;
       const panner = context.createPanner();
       panner.panningModel = "HRTF";
+      // Attenuation is done by `distance` (see voices.ts); the panner only
+      // places the sound.
       panner.distanceModel = "inverse";
-      panner.refDistance = PANNER_REF_DISTANCE;
-      panner.maxDistance = PANNER_MAX_DISTANCE;
-      panner.rolloffFactor = PANNER_ROLLOFF;
+      panner.rolloffFactor = 0;
       const p = options.position;
       if (panner.positionX) {
         panner.positionX.value = p.x;
@@ -169,22 +281,59 @@ export function createAudioSystem(): AudioSystem {
       } else {
         panner.setPosition(p.x, p.y, p.z);
       }
-      gain.connect(panner);
+      gain.connect(distance);
+      distance.connect(filter);
+      filter.connect(panner);
+      filter.connect(send);
       out = panner;
+    } else {
+      gain.connect(send);
     }
-    out.connect(dryBus!);
-    if (!loop) out.connect(reverbIn!);
-    return { source, gain };
+    out.connect(loop ? ambienceBus! : sfxBus!);
+    send.connect(reverbIn!);
+    const chain: Chain = {
+      source,
+      gain,
+      distance,
+      filter,
+      send,
+      position: options.position ?? null,
+      attenuation,
+      sendLevel,
+    };
+    applyDistance(chain, false);
+    return chain;
+  }
+
+  function disconnect(chain: Chain): void {
+    chain.source.disconnect();
+    chain.gain.disconnect();
+    chain.distance?.disconnect();
+    chain.filter?.disconnect();
+    chain.send.disconnect();
   }
 
   function startLoopNow(entry: LoopEntry): void {
     if (!ctx) return;
-    const buffer = bufferFor(entry.sound);
+    const buffer = bufferFor(entry.sound, 0);
     if (!buffer) return;
-    const { source, gain } = makeChain(ctx, buffer, entry.options, true);
-    source.start();
-    entry.source = source;
-    entry.gain = gain;
+    const chain = makeChain(
+      ctx,
+      buffer,
+      entry.options,
+      true,
+      ATTENUATION.ambience,
+      entry.options.position ? BUSES.ambienceReverbSend : 0,
+    );
+    // Fade in, and start at a different point in each loop so several
+    // emitters of the same sound never play in phase.
+    const target = clampGain(entry.options.gain);
+    const t = ctx.currentTime;
+    chain.gain.gain.setValueAtTime(0, t);
+    chain.gain.gain.linearRampToValueAtTime(target, t + BUSES.loopFadeIn);
+    const offset = ((loops.size * 0.37) % 1) * buffer.duration;
+    chain.source.start(t, offset);
+    entry.chain = chain;
   }
 
   return {
@@ -207,8 +356,9 @@ export function createAudioSystem(): AudioSystem {
         return;
       }
       for (const entry of loops.values()) {
-        if (!entry.source) startLoopNow(entry);
+        if (!entry.chain) startLoopNow(entry);
       }
+      queuePrerender();
     },
 
     setListener(position, forward, up) {
@@ -216,19 +366,30 @@ export function createAudioSystem(): AudioSystem {
       listener.forward = forward;
       listener.up = up;
       applyListener();
+      for (const entry of loops.values()) {
+        if (entry.chain) applyDistance(entry.chain, true);
+      }
+      for (const chain of voices.values()) applyDistance(chain, true);
     },
 
     play(sound, options = {}) {
       if (!ctx || ctx.state !== "running" || LOOPING.has(sound)) return;
-      const buffer = bufferFor(sound);
+      const variant = nextTake(sound);
+      const buffer = bufferFor(sound, variant);
       if (!buffer) return;
-      const gainValue = clampGain(options.gain);
       const pitch = clampPitch(options.pitch);
+      const attenuation = ATTENUATION.world;
+      const audible =
+        clampGain(options.gain) *
+        (options.position
+          ? distanceGain(distanceTo(options.position), attenuation)
+          : 1);
       const decision = limiter.request(
         sound,
-        gainValue,
+        audible,
         ctx.currentTime,
         buffer.duration / pitch,
+        PRIORITY_OF[CATEGORY_OF[sound]],
       );
       if (!decision.play) return;
       if (decision.steal !== null) {
@@ -241,21 +402,27 @@ export function createAudioSystem(): AudioSystem {
           voices.delete(decision.steal);
         }
       }
-      const { source, gain } = makeChain(ctx, buffer, options, false);
+      const chain = makeChain(
+        ctx,
+        buffer,
+        options,
+        false,
+        attenuation,
+        options.position ? BUSES.reverbSend : BUSES.playerReverbSend,
+      );
       const id = decision.id;
-      voices.set(id, { source, gain });
-      source.onended = () => {
+      voices.set(id, chain);
+      chain.source.onended = () => {
         voices.delete(id);
         limiter.release(id);
-        source.disconnect();
-        gain.disconnect();
+        disconnect(chain);
       };
-      source.start();
+      chain.source.start();
     },
 
     startLoop(sound, options = {}): LoopHandle {
       const id = nextLoopId++;
-      const entry: LoopEntry = { sound, options, source: null, gain: null };
+      const entry: LoopEntry = { sound, options, chain: null };
       loops.set(id, entry);
       if (ctx && ctx.state === "running") startLoopNow(entry);
       return { id };
@@ -265,19 +432,31 @@ export function createAudioSystem(): AudioSystem {
       const entry = loops.get(handle.id);
       if (!entry) return;
       loops.delete(handle.id);
-      if (!ctx || !entry.source || !entry.gain) return;
+      const chain = entry.chain;
+      if (!ctx || !chain) return;
       const t = ctx.currentTime;
-      const g = entry.gain.gain;
+      const g = chain.gain.gain;
       g.cancelScheduledValues(t);
       g.setValueAtTime(g.value, t);
-      g.linearRampToValueAtTime(0, t + LOOP_FADE_OUT);
-      entry.source.stop(t + LOOP_FADE_OUT + 0.01);
+      g.linearRampToValueAtTime(0, t + BUSES.loopFadeOut);
+      chain.source.stop(t + BUSES.loopFadeOut + 0.01);
+      chain.source.onended = () => disconnect(chain);
     },
 
     setMasterGain(gain) {
       masterGainValue = clampGain(gain);
       if (ctx && masterOut)
-        masterOut.gain.setTargetAtTime(masterGainValue, ctx.currentTime, 0.01);
+        masterOut.gain.setTargetAtTime(
+          masterGainValue * BUSES.master,
+          ctx.currentTime,
+          0.01,
+        );
+    },
+
+    setReverbEnabled(on) {
+      reverbOn = on;
+      if (ctx && reverbReturn)
+        reverbReturn.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.02);
     },
   };
 }

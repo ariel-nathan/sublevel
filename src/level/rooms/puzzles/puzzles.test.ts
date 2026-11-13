@@ -58,6 +58,8 @@ import { DOORWAY } from "./shell";
 
 /** Random parameter sets per module (the contract tests run 4). */
 const SETS = 16;
+/** Random sets for the full contract here (16 with SUBLEVEL_FUZZ=1). */
+const CONTRACT_SETS = process.env.SUBLEVEL_FUZZ === "1" ? 16 : 8;
 const RUN = 5.6;
 /**
  * A plate- or timer-released door: seconds from "let go" until it is shut
@@ -216,10 +218,10 @@ const centre = (b: Box): Vec3 => ({
 
 describe("the module contract (rooms/contract.ts), for more random parameter sets", () => {
   for (const m of [...PUZZLE_MODULES, ...PENDING_MODULES, EXIT_LOCK]) {
-    test(`${m.name}: defaults and ${SETS} more random sets, mirrored and not`, () => {
+    test(`${m.name}: defaults and ${CONTRACT_SETS} more random sets, mirrored and not`, () => {
       expect(
         contractProblems(m, {
-          randomSets: SETS,
+          randomSets: CONTRACT_SETS,
           seedBase: 1001,
           orientations: "mirror",
         }).slice(0, 8),

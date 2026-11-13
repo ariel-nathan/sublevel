@@ -69,6 +69,7 @@ const THROW_LIFTS = [0, 0.1, -0.1];
  */
 const CLIMB_STYLES = [
   { margin: 0.12, rise: 0.05, crawl: 0, backUp: 0 },
+  { margin: 0.12, rise: 0.05, crawl: 0.5, backUp: 0 },
   { margin: 0.12, rise: 0.05, crawl: 0.5, backUp: 0.35 },
   { margin: 0, rise: 0.2, crawl: 1, backUp: 0.35 },
 ];
@@ -376,11 +377,25 @@ export class Solver {
    * walks onto the spot. A try that falls short goes back to where the
    * step began for another run-up; at most CLIMB_TRIES.
    */
-  private async climb(to: Point3): Promise<string | null> {
+  private async climb(to: Point3, depth = 0): Promise<string | null> {
     const start = (await this.pilot.state()).player.feet;
     for (let attempt = 1; attempt <= CLIMB_TRIES; attempt++) {
       let f = (await this.pilot.state()).player.feet;
       if (attempt > 1) {
+        if (f.y < start.y - 0.2 && depth === 0 && start.y - f.y <= 1.0) {
+          // Fell off the surface the climb began on (a crate's top): take a
+          // run-up on the floor and climb back onto it, then try again.
+          const d0 = horizontalDistance(start, to) || 1;
+          const back = {
+            x: start.x + ((start.x - to.x) / d0) * 1.0,
+            z: start.z + ((start.z - to.z) / d0) * 1.0,
+          };
+          this.pilot.log(`climb ${attempt - 1} fell off: back up to the start`);
+          await this.walk(back);
+          const again = await this.climb(start, depth + 1);
+          if (again) return `fell, and could not get back up: ${again}`;
+          f = (await this.pilot.state()).player.feet;
+        }
         if (Math.abs(f.y - start.y) > 0.2) {
           return `fell to height ${f.y.toFixed(2)} on try ${attempt - 1}`;
         }

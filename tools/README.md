@@ -150,8 +150,13 @@ Climbing (`{ do: "climb", to }`, e.g. the maintenance loft's crate
 staircase): the bot faces the point and jumps with a run at it, but keeps
 its edge distance (the surface's edge plus half a body width) until its feet
 are up at the landing height, so that it does not run into the side of a
-stacked crate and shove it off; then it walks onto the spot. A try that falls
-short goes back to where the step began (3 tries). A `walk` to a point lower
+stacked crate and shove it off; then it walks onto the spot. It waits for firm
+footing first (a jump pressed while a crate underfoot still rocks is not
+taken). A try that falls short goes back to where the step began; later tries
+creep in at half speed, then back off along the crate's top for a running
+jump (a jump from a standstill keeps almost no speed in the air); four tries
+in all (`CLIMB_STYLES`). Falling off the crate the climb began on, it takes a
+run-up on the floor and climbs back onto it first. A `walk` to a point lower
 than the feet (off a ledge or a crate, up to 2.5 m) walks to just before the
 edge, creeps over it, brakes in the air and lands, then finishes the walk:
 running off would carry the player two metres past the edge. Set-downs carry

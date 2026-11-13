@@ -16,7 +16,7 @@ Pure logic lives in separate modules with unit tests (`*.test.ts`, no browser):
 | `bun run e2e`                                                                            | Full playthrough with assertions. Exit 1 on any failed check. About 2 s.                                                                                                               | transcript and PASS/FAIL list on stdout; `out/e2e/*.png` milestone frames, `out/e2e/sheet.png` contact sheet, `out/e2e/08-exit-alcove-page.png` full page with HUD |
 | `bun run tour [--only s] [--view v] [--out dir]`                                         | Renders ~36 named viewpoints (every room, doors closed then open). `--only` = name substring; `--view` = `none\|coverage\|material\|depth\|normals\|lighting`; default out `out/tour`. | `out/tour/<name>.png`, `out/tour/sheet-N.png` (3 columns, labelled `NN name`, 12 per sheet), index of grid positions on stdout                                     |
 | `bun run tour --diff <dirA> <dirB> [--out dir]`                                          | Compares two tour outputs view by view.                                                                                                                                                | table of changed-pixel % on stdout; `out/tour-diff/diff-sheet-N.png` rows of `A \| B \| difference x8`, worst first                                                |
-| `bun tools/lint-visual.ts [--only s] [--out dir]`                                        | Detects z-fighting/shimmer and geometry holes from every viewpoint in both door states. Exit 1 if anything is flagged.                                                                 | summary table and cluster bounding boxes on stdout; `out/lint/<view>-<doors>-shimmer.png` (flagged pixels red, clusters boxed), `...-holes.png`                    |
+| `bun tools/lint-visual.ts [--only s] [--out dir]`                                        | Detects z-fighting and geometry holes from every viewpoint in both door states (~7 s). Exit 1 if anything is flagged.                                                                  | summary table and cluster bounding boxes on stdout; `out/lint/<view>-<doors>-shimmer.png` (flagged pixels red, clusters boxed), `...-holes.png`                    |
 | `bun tools/replay.ts <file.json> [--every N] [--from s] [--to s] [--view v] [--out dir]` | Reproduces a replay saved with F8 in normal play.                                                                                                                                      | `out/replay/<step>.png` every N steps (default 30), `out/replay/sheet-N.png` filmstrips labelled `STEP n`; stdout: position over time, event log with step numbers |
 | `bun tools/replay.ts <file.json> --at <step> [--window 20]`                              | Saves every frame from step-window to step+window.                                                                                                                                     | same                                                                                                                                                               |
 
@@ -25,18 +25,49 @@ Viewpoints (name, position, yaw, pitch, door state) are the table `VIEWS` in
 
 ### Visual lint, how to read it
 
-- Shimmer: each view is rendered in the flat `material` debug view, then with
-  the camera moved 1 mm and 3 mm along its right and forward vectors. Pixels
-  whose material changes are "unstable"; one-pixel silhouette crawl is
-  discarded; remaining clusters of at least 4 px are reported.
-  Open `out/lint/<view>-<doors>-shimmer.png`.
-- Holes: in the `coverage` view any pure magenta pixel is a place with no
-  geometry. None are expected in the sealed level.
-- If the renderer has no debug views (it prints "debug views not available
-  in this build"), the lint falls back to comparing lit frames with a large
-  tolerance and skips the hole check. Treat fallback results as hints.
-- The lint cannot see "seeing through a wall into another room" (geometry
-  is drawn, just the wrong one); find those in the tour sheets.
+`bun tools/lint-visual.ts [--only s] [--out dir]` takes about 7 s for all 72
+view-states. Exit code 0: nothing flagged; 1: something flagged; 2: the tool
+itself failed. Output: one table line per viewpoint (closed and open doors),
+then bounding boxes of anything flagged. Annotated images
+(`out/lint/<view>-<doors>-shimmer.png`, `...-holes.png`) are written only for
+flagged view-states.
+
+- Holes: in the `coverage` debug view any pure magenta pixel is a place with
+  no geometry. None are expected in the sealed level.
+- Z-fighting: each view is rendered in the flat `material` view at the base
+  pose and at five poses moved by 1 mm right, 1 mm forward, 3 mm right, 3 mm
+  forward and 2 mm left. Pixels whose material changes in any frame are
+  "unstable". Almost all of them are edge aliasing, so they are explained
+  away using the base pose's `depth` and `normals` views (`findShimmer` in
+  `lint-core.ts`):
+  - within 2 px of a depth edge (second difference, so slanted floors count
+    as smooth) or a normals edge,
+  - within 2 px of a stable material boundary (neighbouring pixels that are
+    both stable and different),
+  - within 2 px of a see-through material (the grate, an alpha cut-out whose
+    holes show whatever is behind), in any frame.
+
+  What remains must still contain a solid area at least 3 px thick (opening
+  with a 3x3 box, after closing 1 px gaps) and at least 12 px to count. On the
+  current level the largest leftover after the edge rules is 1 px thick,
+  while a real z-fight is a block of hundreds or thousands of pixels. The
+  "(N edge px)" in the table is the number of unstable pixels that were
+  explained; it is not a defect count.
+
+- `--self-test` (positive control, not for normal use): injects, through
+  `__game.renderer.createMesh` and a wrapper of `__game.world.drawItems` (no
+  change to `src/`), a quad on the plane of the wall seen from `lab-spawn`, in
+  another material and a few hundredths of a millimetre behind it, so that
+  the winner of the depth test flips with sub-millimetre camera moves. Every
+  variant that really flips must be flagged and the clean view must stay
+  clean; then the quad is removed. See `lint-selftest.ts`.
+- Limits: a defect thinner than 3 px, or within 2 px of an edge (for example
+  z-fighting along a narrow ledge or a skirting board), is not reported;
+  neither is z-fighting on the grate itself. Z-fighting between surfaces of
+  the same material is invisible in the `material` view. The lint cannot see
+  "seeing through a wall into another room" (geometry is drawn, just the
+  wrong one); find those in the tour sheets. It needs the renderer's
+  `coverage` and `material` debug views and stops with an error without them.
 
 ## Reproducing a player's bug
 

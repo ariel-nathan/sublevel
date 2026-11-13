@@ -74,11 +74,14 @@ export class Noise {
 /** A square float canvas with wrapping drawing primitives. */
 export class Canvas {
   readonly data: Float32Array;
+  /** Per-pixel cut-out alpha: 255 solid, 0 a hole. Only holes need setting. */
+  readonly alpha: Uint8Array;
   constructor(
     readonly size: number,
     fill: RGB,
   ) {
     this.data = new Float32Array(size * size * 3);
+    this.alpha = new Uint8Array(size * size).fill(255);
     for (let i = 0; i < size * size; i++) {
       this.data[i * 3] = fill[0];
       this.data[i * 3 + 1] = fill[1];
@@ -101,6 +104,11 @@ export class Canvas {
     this.data[i] = c[0];
     this.data[i + 1] = c[1];
     this.data[i + 2] = c[2];
+  }
+
+  /** Cut a see-through hole (alpha 0) at a pixel. */
+  hole(x: number, y: number): void {
+    this.alpha[this.wrap(y) * this.size + this.wrap(x)] = 0;
   }
 
   /** Blend a colour over a pixel. */
@@ -314,7 +322,7 @@ export class Canvas {
       for (const i of box) for (let c = 0; c < 3; c++) avg[c] += chans[c][i];
       for (const i of box) {
         for (let c = 0; c < 3; c++) out[i * 4 + c] = Math.round(avg[c] / m);
-        out[i * 4 + 3] = 255;
+        out[i * 4 + 3] = this.alpha[i];
       }
     }
     return out;

@@ -85,99 +85,110 @@ function crackLine(
   let ang = angle;
   for (let i = 0; i < steps; i++) {
     c.set(x, y, hex(0x2a1a10));
-    c.blend(x + 1, y, hex(0xe8cf9c), 0.7);
-    c.blend(x, y + 1, hex(0x4a3320), 0.5);
+    c.blend(x, y - 1, hex(0xe8d6ae), 0.55);
     ang = angle + g.rng.range(-jag, jag);
-    x += Math.cos(ang) * 1.2;
-    y += Math.sin(ang) * 1.2;
+    x += Math.cos(ang);
+    y += Math.sin(ang);
   }
 }
 
+/**
+ * The same plank-and-frame crate as crateWood (7 px frame, three planks,
+ * diagonal brace, corner nails), but old: paler and greyer, a plank broken
+ * out on the right, splits along the grain and rust stains under the nails.
+ */
 export const crateWoodWeak = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
-  const dark = hex(0x2b1d12);
-  // vertical boards with gaps
-  const boardTone = [1, 0.9, 1.07, 0.95];
+  const dark = hex(0x241810);
+  const planks = [1, 0.92, 1.05];
   c.each((x, y) => {
-    const frameY = y < 6 || y > 57;
-    const grain = frameY
-      ? g.noise.fbm(x / n, y / n, 2, 48, 3, 5)
-      : g.noise.fbm(x / n, y / n, 48, 2, 3, 6);
-    const b = Math.min(3, Math.floor(x / 16));
-    return scale(
-      mix(hex(0xc4a578), hex(0xa28b66), g.noise.fbm(x / n, y / n, 3, 3, 2, 3)),
-      (0.84 + 0.36 * grain) * (frameY ? 1 : boardTone[b]),
-    );
+    const side = x < 7 || x > 56;
+    const frame = side || y < 7 || y > 56;
+    const grain = side
+      ? g.noise.fbm(x / n, y / n, 48, 2, 3, 5)
+      : g.noise.fbm(x / n, y / n, 2, 48, 3, 6);
+    let t = 0.84 + 0.34 * grain;
+    if (!frame) t *= planks[Math.min(2, Math.floor((y - 7) / 17))];
+    return scale(frame ? hex(0xd0b588) : hex(0xbfa174), t);
   });
-  // board gaps (dark slots) and highlights on the board edges
-  for (let b = 0; b < 4; b++) {
-    const gx = b * 16;
-    for (let y = 6; y < 58; y++) {
-      c.set(gx, y, dark);
-      c.shade(gx + 1, y, 1.18);
-      c.shade(gx + 15, y, 0.82);
+  // plank gaps inside the frame
+  for (const py of [24, 41]) {
+    for (let x = 8; x < 56; x++) {
+      c.shade(x, py, 0.5);
+      c.shade(x, py + 1, 1.1);
     }
   }
-  // top and bottom rails
-  for (let x = 0; x < n; x++) {
-    c.shade(x, 5, 0.55);
-    c.shade(x, 6, 1.2);
-    c.shade(x, 57, 0.55);
-    c.shade(x, 58, 1.2);
-  }
-  // diagonal brace, broken near the middle
+  // diagonal brace, greyer than the boards
   c.each((x, y, col) => {
-    if (y < 8 || y > 55) return;
+    if (x < 8 || x > 55 || y < 8 || y > 55) return;
     const d = x - y;
-    const mid = y > 28 && y < 36;
-    if (Math.abs(d) <= 3 && !mid) {
-      return scale(
-        hex(0xb59a6a),
-        0.9 + 0.2 * g.noise.fbm(x / n, y / n, 12, 12, 2, 8),
-      );
+    if (Math.abs(d) <= 3) {
+      const grain = g.noise.fbm(x / n, y / n, 12, 12, 2, 8);
+      return scale(hex(0xc2a877), 0.88 + 0.25 * grain + (d < -1 ? 0.08 : 0));
     }
-    if (d === 4 && !mid) return scale(col, 0.5);
-    if (d === -4 && !mid) return scale(col, 0.55);
+    if (d === 4) return scale(col, 0.5);
+    if (d === -4) return scale(col, 0.58);
     return col;
   });
-  // the break: missing wood with splinters
-  for (let y = 29; y < 35; y++) {
-    for (let x = y - 3; x <= y + 3; x++) {
-      if ((x + y) % 3 !== 0) c.blend(x, y, dark, 0.8);
+  // frame inner edge groove
+  for (let i = 7; i < 57; i++) {
+    c.shade(i, 7, 0.5);
+    c.shade(7, i, 0.5);
+    c.shade(i, 56, 1.12);
+    c.shade(56, i, 1.12);
+  }
+  c.bevel(1, 1, 62, 62, hex(0xe6d0a4), hex(0x7a5f3a), 0.7);
+  // the middle plank is broken out on the right: dark gap, jagged edge
+  const edge: number[] = [];
+  for (let y = 25; y < 41; y++)
+    edge.push(33 + rng.int(-2, 2) + (y % 3 === 0 ? 1 : 0));
+  for (let y = 25; y < 41; y++) {
+    const ex = edge[y - 25];
+    for (let x = ex; x < 56; x++) c.set(x, y, dark);
+    for (let x = ex + 1; x < 56; x++)
+      c.blend(x, y, hex(0x3a2818), (x - ex) % 5 === 0 ? 0.6 : 0);
+    // pale splinters on the broken edge
+    c.set(ex - 1, y, hex(0xeedcb0));
+    if (y % 2 === 0) c.blend(ex - 2, y, hex(0x4a3420), 0.7);
+  }
+  // splits along the grain
+  crackLine(c, g, 11, 15, 22, 0.05, 0.12);
+  crackLine(c, g, 36, 47, 18, -0.05, 0.12);
+  crackLine(c, g, 3, 14, 20, Math.PI / 2, 0.1);
+  crackLine(c, g, 60, 12, 12, Math.PI / 2, 0.1);
+  // splintered bottom-right corner
+  for (let j = 0; j < 6; j++) {
+    for (let i = 0; i < 6 - j; i++) {
+      if ((i * 3 + j * 5) % 4 !== 0) c.set(63 - i, 63 - j, dark);
     }
   }
-  c.set(27, 28, hex(0xe0c996));
-  c.set(33, 36, hex(0xe0c996));
-  c.set(28, 29, hex(0xe0c996));
-  // cracks and splinters
-  crackLine(c, g, 24, 10, 20, 1.4, 0.45);
-  crackLine(c, g, 40, 20, 28, 1.7, 0.5);
-  crackLine(c, g, 56, 40, 18, 2.0, 0.5);
-  crackLine(c, g, 8, 42, 14, 1.2, 0.45);
-  // splintered corner
-  for (let j = 0; j < 7; j++) {
-    for (let i = 0; i < 7 - j; i++) {
-      if ((i * 3 + j * 5) % 4 !== 0) c.blend(58 + i, 57 + j - 3, dark, 0.8);
-    }
-  }
-  c.set(57, 60, hex(0xe8d3a4));
-  c.set(55, 61, hex(0xe8d3a4));
-  // nails with rust runs
+  c.set(57, 61, hex(0xeedcb0));
+  c.set(60, 58, hex(0xeedcb0));
+  // nails, each with a rust stain running down
   for (const [nx, ny] of [
-    [4, 2],
-    [58, 2],
-    [4, 59],
-    [18, 2],
-    [44, 59],
+    [3, 3],
+    [58, 3],
+    [3, 58],
+    [58, 58],
+    [3, 30],
+    [58, 30],
+    [30, 3],
+    [30, 58],
+    [12, 12],
+    [50, 50],
   ]) {
     nail(c, nx, ny);
-    c.line(nx, ny + 2, nx, ny + 7, hex(0x8a4a22), 0.55);
+    const len = rng.int(6, 11);
+    for (let k = 2; k < len; k++) {
+      c.blend(nx, ny + k, hex(0x8a4a22), 0.5 * (1 - k / len));
+      c.blend(nx + 1, ny + k, hex(0x5b3a20), 0.25 * (1 - k / len));
+    }
   }
   c.frame(0, 0, 64, 64, dark);
-  c.grime(g.noise, 4, 4, 11, 0.5, 1.0, hex(0x7a6444));
-  c.scuffs(rng, 24, hex(0xe0cca0), 0.3, 6);
-  c.scuffs(rng, 20, hex(0x4a3822), 0.3, 6);
+  c.grime(g.noise, 4, 4, 11, 0.55, 0.8, hex(0x7a6444));
+  c.scuffs(rng, 24, hex(0xe8d8b0), 0.28, 7);
+  c.scuffs(rng, 14, hex(0x4a3822), 0.28, 6);
   c.grain(rng, 0.035);
 };
 
@@ -248,9 +259,11 @@ export const barrelSide = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
   const paint = hex(0x3f6c87);
+  // smooth painted steel with a gentle cylinder-like tone along x
   c.each((x, y) => {
-    const v = g.noise.fbm(x / n, y / n, 6, 6, 3, 4);
-    return scale(paint, 0.88 + 0.26 * v);
+    const v = g.noise.fbm(x / n, y / n, 4, 4, 2, 4);
+    const round = 1 + 0.06 * Math.cos((x / n) * Math.PI * 4);
+    return scale(paint, (0.93 + 0.14 * v) * round);
   });
   // coloured band around the middle
   c.each((x, y, col) => {
@@ -258,6 +271,8 @@ export const barrelSide = (c: Canvas, g: GenContext): void => {
     if (y === 26 || y === 39) return scale(col, 0.7);
     return col;
   });
+  c.rect(0, 27, n, 1, hex(0xeaa84e));
+  c.rect(0, 38, n, 1, hex(0xa8671f));
   // abstract stencil blocks on the band
   for (const [bx, bw] of [
     [6, 5],
@@ -270,36 +285,36 @@ export const barrelSide = (c: Canvas, g: GenContext): void => {
     c.rect(bx, 30, bw, 5, hex(0x2a2a26));
     c.rect(bx, 30, bw, 1, hex(0x4a4a44));
   }
-  // raised ribs
-  for (const ry of [14, 50]) {
+  // raised ribs: bright top, body, dark under-edge and a shadow below
+  for (const ry of [13, 50]) {
     c.rect(0, ry - 1, n, 1, hex(0x1d3646));
-    c.rect(0, ry, n, 1, hex(0x7fb0cc));
-    c.rect(0, ry + 1, n, 2, scale(paint, 1.1));
+    c.rect(0, ry, n, 1, hex(0x9fcbe0));
+    c.rect(0, ry + 1, n, 2, hex(0x4f84a3));
     c.rect(0, ry + 3, n, 1, hex(0x1d3646));
-    c.shadeRect(0, ry + 4, n, 1, 0.8);
+    c.shadeRect(0, ry + 4, n, 1, 0.82);
   }
-  // paint chips and scratches
-  for (let i = 0; i < 14; i++) {
+  // a few paint chips
+  for (let i = 0; i < 5; i++) {
     const x = rng.int(0, n - 1);
-    const y = rng.int(4, n - 5);
-    c.blend(x, y, hex(0x8a8f92), 0.9);
-    c.blend(x + 1, y, hex(0x8a8f92), 0.7);
-    c.blend(x, y + 1, hex(0x30343a), 0.7);
+    const y = rng.int(18, 24);
+    c.blend(x, y, hex(0x8a8f92), 0.85);
+    c.blend(x + 1, y, hex(0x30343a), 0.6);
   }
-  // rust gathering at the top and bottom edges (symmetric over the wrap)
+  // rust gathers at the bottom rim, a little at the top (wraps cleanly)
   c.each((x, y, col) => {
-    const d = ((y - 62 + 32 + 64) % 64) - 32;
+    const below = y >= 32 ? 63 - y : -1;
+    const above = y < 32 ? y : -1;
     const k =
-      Math.exp(-Math.abs(d) / 5) *
-      (0.35 + 1.1 * g.noise.fbm(x / n, y / n, 12, 12, 3, 9));
+      (below >= 0 ? Math.exp(-below / 4.5) : 0.55 * Math.exp(-above / 2.5)) *
+      (0.45 + 1.0 * g.noise.fbm(x / n, y / n, 10, 10, 2, 9));
     if (k > 0.55)
-      return mix(col, hex(0x8a4a26), Math.min(0.9, (k - 0.45) * 1.6));
-    if (k > 0.4) return mix(col, hex(0x5a4a3a), 0.5);
+      return mix(col, hex(0x8a4a26), Math.min(0.85, (k - 0.4) * 1.5));
+    if (k > 0.38) return mix(col, hex(0x5a4a3a), 0.45);
     return col;
   });
-  c.grime(g.noise, 5, 5, 6, 0.6, 0.9, hex(0x24384a));
-  c.scuffs(rng, 20, hex(0xa9cde0), 0.28, 8);
-  c.grain(rng, 0.03);
+  c.grime(g.noise, 5, 5, 6, 0.66, 0.5, hex(0x24384a));
+  c.scuffs(rng, 10, hex(0xa9cde0), 0.25, 8);
+  c.grain(rng, 0.025);
 };
 
 export const barrelTop = (c: Canvas, g: GenContext): void => {

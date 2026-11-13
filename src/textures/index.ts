@@ -34,7 +34,7 @@ const RECIPES: Record<MaterialId, Recipe> = {
     base: 0xd2d0c6,
     generate: arch.ceilingPanel,
   },
-  lab_wall: { size: 64, colors: 16, base: 0xdde2de, generate: arch.labWall },
+  lab_wall: { size: 128, colors: 22, base: 0xdde2de, generate: arch.labWall },
   lab_floor_tile: {
     size: 64,
     colors: 16,
@@ -109,8 +109,8 @@ const RECIPES: Record<MaterialId, Recipe> = {
     generate: props.rubberDark,
   },
   pressure_plate: {
-    size: 32,
-    colors: 14,
+    size: 64,
+    colors: 16,
     base: 0x3f464a,
     generate: arch.pressurePlate,
   },

@@ -9,6 +9,14 @@ function px(img: { size: number; pixels: Uint8Array }, x: number, y: number) {
   return [img.pixels[i], img.pixels[i + 1], img.pixels[i + 2]];
 }
 
+function solid(
+  img: { size: number; pixels: Uint8Array },
+  x: number,
+  y: number,
+) {
+  return img.pixels[(y * img.size + x) * 4 + 3] === 255;
+}
+
 function diff(a: number[], b: number[]): number {
   return (
     (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2])) / 3
@@ -27,7 +35,9 @@ describe("textures", () => {
       expect(img.size).toBeLessThanOrEqual(128);
       expect(img.pixels.length).toBe(img.size * img.size * 4);
       for (let i = 3; i < img.pixels.length; i += 4) {
-        expect(img.pixels[i]).toBe(255);
+        // only the grating has real openings, and alpha is strictly 0 or 255
+        if (id === "metal_grate") expect([0, 255]).toContain(img.pixels[i]);
+        else expect(img.pixels[i]).toBe(255);
       }
     }
   });
@@ -54,12 +64,17 @@ describe("textures", () => {
       let wrapY = 0;
       let inX = 0;
       let inY = 0;
+      // colour under a cut-out hole is meaningless: compare solid pairs only
+      const d = (x0: number, y0: number, x1: number, y1: number) =>
+        solid(img, x0, y0) && solid(img, x1, y1)
+          ? diff(px(img, x0, y0), px(img, x1, y1))
+          : 0;
       for (let i = 0; i < n; i++) {
-        wrapX += diff(px(img, n - 1, i), px(img, 0, i));
-        wrapY += diff(px(img, i, n - 1), px(img, i, 0));
+        wrapX += d(n - 1, i, 0, i);
+        wrapY += d(i, n - 1, i, 0);
         for (let j = 0; j < n - 1; j++) {
-          inX += diff(px(img, j, i), px(img, j + 1, i));
-          inY += diff(px(img, i, j), px(img, i, j + 1));
+          inX += d(j, i, j + 1, i);
+          inY += d(i, j, i, j + 1);
         }
       }
       wrapX /= n;
@@ -69,6 +84,43 @@ describe("textures", () => {
       expect(wrapX).toBeLessThanOrEqual(inX * 1.6 + 4);
       expect(wrapY).toBeLessThanOrEqual(inY * 1.6 + 4);
     }
+  });
+
+  test("grate: open fraction in range, bars thick, alpha tiles", () => {
+    const img = set.get("metal_grate");
+    expect(img).toBeDefined();
+    if (!img) return;
+    const n = img.size;
+    const a = (x: number, y: number) => img.pixels[(y * n + x) * 4 + 3];
+    let open = 0;
+    for (let y = 0; y < n; y++)
+      for (let x = 0; x < n; x++) if (a(x, y) === 0) open++;
+    const frac = open / (n * n);
+    expect(frac).toBeGreaterThanOrEqual(0.35);
+    expect(frac).toBeLessThanOrEqual(0.5);
+    // periodic with 16 texels in both directions, which divides the size: so
+    // alpha tiles seamlessly across the wrap
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        expect(a(x, y)).toBe(a((x + 16) % n, y));
+        expect(a(x, y)).toBe(a(x, (y + 16) % n));
+      }
+    }
+    // every run of solid texels along a row is at least 2 wide
+    for (let y = 0; y < n; y++) {
+      let run = 0;
+      for (let x = 0; x < 2 * n; x++) {
+        if (a(x % n, y) === 255) run++;
+        else {
+          if (run > 0) expect(run).toBeGreaterThanOrEqual(2);
+          run = 0;
+        }
+      }
+    }
+  });
+
+  test("lab_wall is a full-height 128 section", () => {
+    expect(set.get("lab_wall")?.size).toBe(128);
   });
 
   test("not flat, sane palette, brightness by emissiveness", () => {

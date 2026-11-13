@@ -51,9 +51,12 @@ export function buildSheet(set: TextureSet, opts: SheetOptions): Sheet {
         const sx = Math.floor(x / opts.scale) % tex.size;
         const s = (sy * tex.size + sx) * 4;
         const d = ((oy + y) * width + ox + x) * 4;
-        rgba[d] = tex.pixels[s];
-        rgba[d + 1] = tex.pixels[s + 1];
-        rgba[d + 2] = tex.pixels[s + 2];
+        // cut-out holes show a dark checker so they are visible on the sheet
+        const a = tex.pixels[s + 3] >= 128 ? 1 : 0;
+        const checker = ((x >> 3) + (y >> 3)) % 2 === 0 ? 34 : 54;
+        rgba[d] = a ? tex.pixels[s] : checker;
+        rgba[d + 1] = a ? tex.pixels[s + 1] : checker;
+        rgba[d + 2] = a ? tex.pixels[s + 2] : checker + 4;
         rgba[d + 3] = 255;
       }
     }

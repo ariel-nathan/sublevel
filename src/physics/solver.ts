@@ -90,6 +90,8 @@ export class Manifold {
   twistImpulse = 0;
   /** Total normal impulse over the step. */
   total = 0;
+  /** Consecutive steps this contact existed before the current one. */
+  age = 0;
   /** Impact event held back one step to merge impacts spanning two steps. */
   pending: ContactEvent | null = null;
   /** True when `b` has infinite mass (static, kinematic, character). */

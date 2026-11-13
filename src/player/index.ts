@@ -7,6 +7,7 @@ import type {
   Aabb,
   BodyState,
   Camera,
+  CharacterMoveResult,
   ColliderRef,
   PhysicsWorld,
   Player,
@@ -83,7 +84,14 @@ export function createPlayer(options: PlayerOptions): Player {
   let crouched = false;
   let height: number = PLAYER.standHeight;
   let center: Vec3 = { x: spawn.x, y: spawn.y + height / 2, z: spawn.z };
+  /**
+   * The player's own velocity. While on the ground it is relative to the
+   * ground, which carries the player along with `groundVelocity`; in the air
+   * it is the velocity in the world.
+   */
   let velocity: Vec3 = { x: 0, y: 0, z: 0 };
+  /** Velocity of the ground under the player (zero when airborne). */
+  let groundVelocity: Vec3 = { x: 0, y: 0, z: 0 };
   let yaw = options.spawn.yaw;
   let pitch = 0;
   let onGround = false;
@@ -156,6 +164,45 @@ export function createPlayer(options: PlayerOptions): Player {
   const sameRef = (a: ColliderRef | null, kind: string, id: number): boolean =>
     a !== null && a.kind === kind && a.id === id;
 
+  /** The player's velocity in the world, ground motion included. */
+  const worldVelocity = (): Vec3 => ({
+    x: velocity.x + groundVelocity.x,
+    y: velocity.y,
+    z: velocity.z + groundVelocity.z,
+  });
+
+  /**
+   * How fast the ground carries the player. Statics and kinematics are
+   * ridden exactly. Dynamic bodies are ridden only when heavy enough
+   * (RIDE_MIN_MASS) and moving faster than RIDE_DEADBAND, clamped to
+   * RIDE_MAX_SPEED. The player only presses down on what it stands on and
+   * never pushes it along, so riding cannot speed a crate up (no surfing
+   * loop); a light prop squirming under the player's weight does not carry
+   * the player around, and a loaded crate's slight give does not make the
+   * player creep.
+   */
+  function rideVelocity(result: CharacterMoveResult): Vec3 {
+    const on = result.standingOn;
+    const gv = result.groundVelocity;
+    if (!result.onGround || !on || on.kind === "static") {
+      return { x: 0, y: 0, z: 0 };
+    }
+    if (on.kind === "kinematic") {
+      return { ...gv };
+    }
+    const body = physics.getBody(on.id);
+    const speed = v3.length(gv);
+    if (
+      !body ||
+      body.mass < T.RIDE_MIN_MASS ||
+      !(speed > T.RIDE_DEADBAND) ||
+      !Number.isFinite(speed)
+    ) {
+      return { x: 0, y: 0, z: 0 };
+    }
+    return clampLength(gv, T.RIDE_MAX_SPEED);
+  }
+
   function updateCrouch(want: boolean, airborne: boolean): void {
     const diff = PLAYER.standHeight - PLAYER.crouchHeight;
     if (want && !crouched) {
@@ -219,7 +266,7 @@ export function createPlayer(options: PlayerOptions): Player {
     const right = quat.rotate(yawQuat(yaw), { x: 1, y: 0, z: 0 });
     const speed = T.throwSpeed(body.mass);
     const linear = v3.add(
-      v3.add(velocity, v3.scale(fwd, speed)),
+      v3.add(worldVelocity(), v3.scale(fwd, speed)),
       v3.scale(UP, T.THROW_UP),
     );
     physics.setBodyVelocity(id, linear, v3.scale(right, -T.THROW_SPIN));
@@ -330,7 +377,7 @@ export function createPlayer(options: PlayerOptions): Player {
     const k = T.carryLightness(body.mass);
     const linear = v3.add(
       clampLength(v3.scale(error, T.HOLD_GAIN * k), T.HOLD_MAX_SPEED * k),
-      velocity,
+      worldVelocity(),
     );
     // Cancel this step's gravity so the prop does not sag below the target.
     linear.x -= physics.gravity.x * dt;
@@ -387,6 +434,9 @@ export function createPlayer(options: PlayerOptions): Player {
     const startedOnGround = onGround;
     const startFeetY = center.y - height / 2;
     if (jumping) {
+      // Leaving the ground: keep its horizontal motion (momentum carries).
+      velocity = worldVelocity();
+      groundVelocity = { x: 0, y: 0, z: 0 };
       velocity.y = T.JUMP_VELOCITY;
       events.push({ type: "jump" });
     }
@@ -410,14 +460,54 @@ export function createPlayer(options: PlayerOptions): Player {
     }
     const fallSpeed = velocity.y;
 
-    const result = physics.moveCharacter(center, halfExtents(), velocity, dt, {
-      stepHeight: PLAYER.stepHeight,
-      ignoreBody: held?.id,
-    });
+    // Ride the ground: its horizontal motion, and its downward motion so a
+    // descending lift is followed. Upward motion needs no help (the ground
+    // lifts the character out of itself), and adding it would make the
+    // character leave the ground.
+    const carry: Vec3 =
+      onGround && !jumping
+        ? {
+            x: groundVelocity.x,
+            y: Math.min(0, groundVelocity.y),
+            z: groundVelocity.z,
+          }
+        : { x: 0, y: 0, z: 0 };
+    const previousGround = standingOn;
+    const result = physics.moveCharacter(
+      center,
+      halfExtents(),
+      v3.add(velocity, carry),
+      dt,
+      {
+        stepHeight: PLAYER.stepHeight,
+        ignoreBody: held?.id,
+      },
+    );
     center = result.position;
     velocity = { ...result.velocity };
     onGround = result.onGround;
     standingOn = result.standingOn;
+    const nextGroundVelocity = rideVelocity(result);
+    if (onGround) {
+      // Back to a velocity relative to the ground. On the same ground take
+      // off exactly what was added, so a platform that changes speed still
+      // carries the player exactly; on new ground (landing, stepping across)
+      // the world velocity is kept and friction takes over.
+      const same =
+        startedOnGround &&
+        !jumping &&
+        previousGround !== null &&
+        result.standingOn !== null &&
+        previousGround.kind === result.standingOn.kind &&
+        previousGround.id === result.standingOn.id;
+      const off = same ? carry : nextGroundVelocity;
+      velocity.x -= off.x;
+      velocity.z -= off.z;
+    }
+    // How far the ground itself moved up since the last step.
+    const groundRise =
+      onGround && startedOnGround ? result.groundVelocity.y * dt : 0;
+    groundVelocity = onGround ? nextGroundVelocity : { x: 0, y: 0, z: 0 };
     if (result.hitCeiling && velocity.y > 0) {
       velocity.y = 0;
     }
@@ -440,7 +530,8 @@ export function createPlayer(options: PlayerOptions): Player {
       }
       stepDistance = 0;
     } else if (onGround && startedOnGround && !jumping) {
-      const dy = feetY - startFeetY;
+      // Only the player's own climbing is smoothed, not riding a lift.
+      const dy = feetY - startFeetY - groundRise;
       if (Math.abs(dy) > T.STEP_SMOOTH_MIN) {
         stepOffset = clamp(stepOffset - dy, -0.5, 0.5);
       }
@@ -487,7 +578,7 @@ export function createPlayer(options: PlayerOptions): Player {
       return feet();
     },
     get velocity() {
-      return { ...velocity };
+      return worldVelocity();
     },
     get yaw() {
       return yaw;

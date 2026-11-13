@@ -57,6 +57,44 @@ const EVENT_MIN_IMPULSE = 0.1;
 const EVENT_IMPACT_SPEED = 0.5;
 /** Fraction of the character's weight it can push with. */
 const PUSH_FORCE_FACTOR = 0.5;
+/** Contacts must have existed this many steps before to count as sliding. */
+const SLIDE_MIN_AGE = 2;
+/** Slip or roll speed (m/s) below which a contact is not sliding. */
+const SLIDE_MIN_SPEED = 0.05;
+/** Normal force (N) below which a contact is a mere touch. */
+const SLIDE_MIN_FORCE = 1;
+/**
+ * A kinematic move is blocked when something must be pushed further than it
+ * can go by more than this (metres).
+ */
+const BLOCK_TOLERANCE = 0.002;
+/**
+ * Boxes must overlap by more than this across the push direction to press on
+ * each other; resting and sliding contacts (a crate on the floor while a door
+ * pushes it sideways) are not in the way.
+ */
+const BLOCK_SIDE_SHRINK = 0.02;
+/** Longest chain of bodies followed when looking for free room. */
+const BLOCK_MAX_DEPTH = 6;
+
+/** Axis-aligned bounds, as stored by bodies and statics. */
+interface Bounds {
+  minx: number;
+  miny: number;
+  minz: number;
+  maxx: number;
+  maxy: number;
+  maxz: number;
+}
+
+/** Scratch result of measuring a sliding contact. */
+interface SlideMeasure {
+  px: number;
+  py: number;
+  pz: number;
+  slip: number;
+  roll: number;
+}
 
 interface Kinematic {
   id: number;
@@ -174,7 +212,30 @@ export class World implements PhysicsWorld {
   private readonly staticProxy = new Body(-1, 0, 0, 0, 0, false);
   private readonly characterProxy = new Body(-2, 0.3, 0.9, 0.3, 0, false);
   private character: CharacterObstacle | null = null;
+  /** The character as of the latest moveCharacter, kept past the step. */
+  private lastCharacter: CharacterObstacle | null = null;
+  private lastCharacterStep = -1;
+  private stepCount = 0;
   private lastStandingOn = -1;
+  /** Manifolds solved in the last step and its dt, for slidingContacts. */
+  private lastManifolds: Manifold[] = [];
+  private lastDt = 0;
+  private slideCache: SlidingContact[] | null = null;
+  private readonly slideScratch: SlideMeasure = {
+    px: 0,
+    py: 0,
+    pz: 0,
+    slip: 0,
+    roll: 0,
+  };
+  /** State of the current blocked-move query (see moveKinematic). */
+  private pushUx = 0;
+  private pushUy = 0;
+  private pushUz = 0;
+  private pushKinematic = -1;
+  private pushCharacter: CharacterObstacle | null = null;
+  private readonly pushVisited = new Set<number>();
+  private pushCharacterVisited = false;
   private manifolds = new Map<number, Manifold>();
   private events: ContactEvent[] = [];
   private contactSoft: Softness = makeSoft(0, 0, 1);
@@ -234,16 +295,327 @@ export class World implements PhysicsWorld {
     if (!k) {
       return { blocked: false };
     }
-    k.minx = min.x;
-    k.miny = min.y;
-    k.minz = min.z;
-    // Not implemented yet: moves are never reported as blocked.
-    return { blocked: false };
+    const dx = min.x - k.minx;
+    const dy = min.y - k.miny;
+    const dz = min.z - k.minz;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-9 || len > KINEMATIC_TELEPORT) {
+      k.minx = min.x;
+      k.miny = min.y;
+      k.minz = min.z;
+      return { blocked: false };
+    }
+    const advance = this.freeAdvance(k, dx / len, dy / len, dz / len, len);
+    if (advance >= len) {
+      k.minx = min.x;
+      k.miny = min.y;
+      k.minz = min.z;
+      return { blocked: false };
+    }
+    const a = Math.max(0, advance) / len;
+    k.minx += dx * a;
+    k.miny += dy * a;
+    k.minz += dz * a;
+    return { blocked: true };
+  }
+
+  /**
+   * How far a kinematic box can move along unit direction u (up to `len`)
+   * without crushing anything: Infinity when the whole move is free,
+   * otherwise the distance at which the first squeezed body or the
+   * character would be pressed against something immovable.
+   *
+   * Every body (and the character) ahead of the box that the move would
+   * reach needs to be pushed by `need`; its free room along u is found by
+   * following what lies ahead of it: statics and other kinematics stop it,
+   * other bodies pass the question on (they can be pushed too). Bounds are
+   * shrunk across the push direction so that resting and sliding contacts
+   * (the floor under a crate) never count as obstacles.
+   */
+  private freeAdvance(
+    k: Kinematic,
+    ux: number,
+    uy: number,
+    uz: number,
+    len: number,
+  ): number {
+    this.pushUx = ux;
+    this.pushUy = uy;
+    this.pushUz = uz;
+    this.pushKinematic = k.id;
+    this.pushCharacter =
+      this.lastCharacter && this.stepCount - this.lastCharacterStep <= 1
+        ? this.lastCharacter
+        : null;
+    const box: Bounds = {
+      minx: k.minx,
+      miny: k.miny,
+      minz: k.minz,
+      maxx: k.minx + k.sx,
+      maxy: k.miny + k.sy,
+      maxz: k.minz + k.sz,
+    };
+    const front = this.projHi(box);
+    const region = this.sweepRegion(box, len);
+    let limit = Infinity;
+    for (const b of this.bodyList) {
+      if (!overlapsBounds(b, region) || this.projHi(b) <= front) {
+        continue;
+      }
+      // Bodies the box is already more than half way past are not pushed
+      // ahead of it (the solver lets a crushing box through them instead).
+      if (this.projMid(b) < front) {
+        continue;
+      }
+      const gap = this.projLo(b) - front;
+      const need = len - gap;
+      if (need <= 0) {
+        continue;
+      }
+      this.pushVisited.clear();
+      this.pushVisited.add(b.id);
+      this.pushCharacterVisited = false;
+      const room = this.roomAhead(b, need, 1, b, false);
+      if (room < need - BLOCK_TOLERANCE) {
+        limit = Math.min(limit, gap + room);
+      }
+    }
+    const ch = this.pushCharacter;
+    if (ch) {
+      const cb = characterBounds(ch);
+      if (
+        overlapsBounds(cb, region) &&
+        this.projHi(cb) > front &&
+        this.projMid(cb) >= front
+      ) {
+        const gap = this.projLo(cb) - front;
+        const need = len - gap;
+        if (need > 0) {
+          this.pushVisited.clear();
+          this.pushCharacterVisited = true;
+          const room = this.roomAhead(cb, need, 1, null, true);
+          if (room < need - BLOCK_TOLERANCE) {
+            limit = Math.min(limit, gap + room);
+          }
+        }
+      }
+    }
+    this.pushCharacter = null;
+    return limit;
+  }
+
+  /**
+   * Free distance (at most `want`) that a body, or the character, with
+   * bounds `box` can move along the push direction before it is stopped by
+   * something immovable, following chains of bodies in the way.
+   */
+  private roomAhead(
+    box: Bounds,
+    want: number,
+    depth: number,
+    self: Body | null,
+    isCharacter: boolean,
+  ): number {
+    let room = want;
+    const front = this.projHi(box);
+    const region = this.sweepRegion(box, want);
+    for (const s of this.statics.query(
+      region.minx,
+      region.miny,
+      region.minz,
+      region.maxx,
+      region.maxy,
+      region.maxz,
+    )) {
+      if (this.projHi(s) > front) {
+        room = Math.min(room, Math.max(0, this.projLo(s) - front));
+      }
+    }
+    for (const k of this.kinematics.values()) {
+      if (k.id === this.pushKinematic) {
+        continue;
+      }
+      const kb: Bounds = {
+        minx: k.minx,
+        miny: k.miny,
+        minz: k.minz,
+        maxx: k.minx + k.sx,
+        maxy: k.miny + k.sy,
+        maxz: k.minz + k.sz,
+      };
+      if (overlapsBounds(kb, region) && this.projHi(kb) > front) {
+        room = Math.min(room, Math.max(0, this.projLo(kb) - front));
+      }
+    }
+    if (room <= 0) {
+      return 0;
+    }
+    const ch = this.pushCharacter;
+    if (ch && !isCharacter && self && self.id !== ch.ignoreBody) {
+      const cb = characterBounds(ch);
+      if (overlapsBounds(cb, region) && this.projHi(cb) > front) {
+        const gap = Math.max(0, this.projLo(cb) - front);
+        if (gap < room) {
+          // The character rides what it stands on; anything else presses
+          // against it as against a wall (it is immovable to the solver).
+          if (
+            self.id === ch.standingOn &&
+            !this.pushCharacterVisited &&
+            depth < BLOCK_MAX_DEPTH
+          ) {
+            this.pushCharacterVisited = true;
+            room = Math.min(
+              room,
+              gap + this.roomAhead(cb, room - gap, depth + 1, null, true),
+            );
+            this.pushCharacterVisited = false;
+          } else {
+            room = gap;
+          }
+        }
+      }
+    }
+    for (const b of this.bodyList) {
+      if (room <= 0) {
+        return 0;
+      }
+      if (
+        b === self ||
+        this.pushVisited.has(b.id) ||
+        (isCharacter && ch !== null && b.id === ch.ignoreBody) ||
+        !overlapsBounds(b, region) ||
+        this.projHi(b) <= front
+      ) {
+        continue;
+      }
+      const gap = Math.max(0, this.projLo(b) - front);
+      if (gap >= room) {
+        continue;
+      }
+      if (depth >= BLOCK_MAX_DEPTH) {
+        room = gap;
+        continue;
+      }
+      this.pushVisited.add(b.id);
+      room = Math.min(
+        room,
+        gap + this.roomAhead(b, room - gap, depth + 1, b, false),
+      );
+      this.pushVisited.delete(b.id);
+    }
+    return Math.max(0, room);
+  }
+
+  /** Bounds swept `dist` along the push direction, shrunk across it. */
+  private sweepRegion(box: Bounds, dist: number): Bounds {
+    const ux = this.pushUx;
+    const uy = this.pushUy;
+    const uz = this.pushUz;
+    const sx = BLOCK_SIDE_SHRINK * (1 - Math.abs(ux));
+    const sy = BLOCK_SIDE_SHRINK * (1 - Math.abs(uy));
+    const sz = BLOCK_SIDE_SHRINK * (1 - Math.abs(uz));
+    return {
+      minx: box.minx + Math.min(0, ux * dist) + sx,
+      miny: box.miny + Math.min(0, uy * dist) + sy,
+      minz: box.minz + Math.min(0, uz * dist) + sz,
+      maxx: box.maxx + Math.max(0, ux * dist) - sx,
+      maxy: box.maxy + Math.max(0, uy * dist) - sy,
+      maxz: box.maxz + Math.max(0, uz * dist) - sz,
+    };
+  }
+
+  private projMid(b: Bounds): number {
+    return (
+      ((b.minx + b.maxx) * this.pushUx +
+        (b.miny + b.maxy) * this.pushUy +
+        (b.minz + b.maxz) * this.pushUz) *
+      0.5
+    );
+  }
+
+  private projHalf(b: Bounds): number {
+    return (
+      (Math.abs(this.pushUx) * (b.maxx - b.minx) +
+        Math.abs(this.pushUy) * (b.maxy - b.miny) +
+        Math.abs(this.pushUz) * (b.maxz - b.minz)) *
+      0.5
+    );
+  }
+
+  private projLo(b: Bounds): number {
+    return this.projMid(b) - this.projHalf(b);
+  }
+
+  private projHi(b: Bounds): number {
+    return this.projMid(b) + this.projHalf(b);
   }
 
   slidingContacts(): SlidingContact[] {
-    // Not implemented yet.
-    return [];
+    if (this.slideCache) {
+      return this.slideCache;
+    }
+    const out: SlidingContact[] = [];
+    this.slideCache = out;
+    const dt = this.lastDt;
+    if (!(dt > 0)) {
+      return out;
+    }
+    const s = this.slideScratch;
+    let any = false;
+    for (const m of this.lastManifolds) {
+      if (
+        m.kind === PairKind.Character ||
+        m.age < SLIDE_MIN_AGE ||
+        m.total < SLIDE_MIN_FORCE * dt
+      ) {
+        continue;
+      }
+      // A contact between two bodies belongs to the one moving more.
+      const onB = m.kind === PairKind.Body && motion(m.b) > motion(m.a);
+      const self = onB ? m.b : m.a;
+      if (self.asleep || this.bodyMap.get(self.id) !== self) {
+        continue;
+      }
+      measureSlide(m, onB, s);
+      if (s.slip < SLIDE_MIN_SPEED && s.roll < SLIDE_MIN_SPEED) {
+        continue;
+      }
+      const score = (s.slip + s.roll) * m.total;
+      if (score > self.slideScore) {
+        self.slideScore = score;
+        self.slideContact = m;
+        any = true;
+      }
+    }
+    if (!any) {
+      return out;
+    }
+    for (const b of this.bodyList) {
+      const m = b.slideContact as Manifold | null;
+      if (!m) {
+        continue;
+      }
+      b.slideContact = null;
+      b.slideScore = 0;
+      const onB = m.b === b;
+      measureSlide(m, onB, s);
+      const other: ColliderRef = onB
+        ? { kind: "body", id: m.a.id }
+        : m.kind === PairKind.Static
+          ? { kind: "static", id: m.otherId }
+          : m.kind === PairKind.Kinematic
+            ? { kind: "kinematic", id: m.otherId }
+            : { kind: "body", id: m.b.id };
+      out.push({
+        body: b.id,
+        other,
+        point: { x: s.px, y: s.py, z: s.pz },
+        slipSpeed: s.slip,
+        rollSpeed: s.roll,
+        force: m.total / dt,
+      });
+    }
+    return out;
   }
 
   removeKinematic(id: number): void {
@@ -860,6 +1232,10 @@ export class World implements PhysicsWorld {
       k.pminz = k.minz;
     }
     this.character = null;
+    this.lastManifolds = all;
+    this.lastDt = dt;
+    this.slideCache = null;
+    this.stepCount++;
   }
 
   /**
@@ -978,6 +1354,7 @@ export class World implements PhysicsWorld {
       m.tangentImpulse1 = old.tangentImpulse1;
       m.tangentImpulse2 = old.tangentImpulse2;
       m.twistImpulse = old.twistImpulse;
+      m.age = old.age + 1;
     }
     return m;
   }
@@ -1378,6 +1755,38 @@ export class World implements PhysicsWorld {
       ignoreBody: ignore,
       standingOn: groundBody ? groundBody.id : -1,
     };
+    this.lastCharacter = this.character;
+    this.lastCharacterStep = this.stepCount;
+
+    // Velocity of the ground at the feet.
+    let gvx = 0;
+    let gvy = 0;
+    let gvz = 0;
+    const ground = res.ground;
+    if (groundBody) {
+      const p = closestPointOnBody(groundBody, res.px, res.py - he.y, res.pz);
+      const rx = p.x - groundBody.px;
+      const ry = p.y - groundBody.py;
+      const rz = p.z - groundBody.pz;
+      gvx = groundBody.vx + groundBody.wy * rz - groundBody.wz * ry;
+      gvy = groundBody.vy + groundBody.wz * rx - groundBody.wx * rz;
+      gvz = groundBody.vz + groundBody.wx * ry - groundBody.wy * rx;
+    } else if (ground && ground.ref.kind === "kinematic" && dt > 0) {
+      // The motion it is making in the coming step (moveKinematic has
+      // already placed it), which is also its motion over the last one
+      // for a box moving steadily.
+      const k = this.kinematics.get(ground.ref.id);
+      if (k) {
+        const mx = k.minx - k.pminx;
+        const my = k.miny - k.pminy;
+        const mz = k.minz - k.pminz;
+        if (Math.hypot(mx, my, mz) <= KINEMATIC_TELEPORT) {
+          gvx = mx / dt;
+          gvy = my / dt;
+          gvz = mz / dt;
+        }
+      }
+    }
 
     return {
       position: { x: res.px, y: res.py, z: res.pz },
@@ -1388,10 +1797,103 @@ export class World implements PhysicsWorld {
         ? { kind: res.ground.ref.kind, id: res.ground.ref.id }
         : null,
       hitCeiling: res.hitCeiling,
-      // Not implemented yet: the ground is always reported as still.
-      groundVelocity: { x: 0, y: 0, z: 0 },
+      groundVelocity: { x: gvx, y: gvy, z: gvz },
     };
   }
+}
+
+function overlapsBounds(a: Bounds, b: Bounds): boolean {
+  return overlaps(a, b.minx, b.miny, b.minz, b.maxx, b.maxy, b.maxz);
+}
+
+function characterBounds(ch: CharacterObstacle): Bounds {
+  return {
+    minx: ch.px - ch.hx,
+    miny: ch.py - ch.hy,
+    minz: ch.pz - ch.hz,
+    maxx: ch.px + ch.hx,
+    maxy: ch.py + ch.hy,
+    maxz: ch.pz + ch.hz,
+  };
+}
+
+/** Linear plus rotational speed, to tell which of two bodies is moving. */
+function motion(b: Body): number {
+  return Math.hypot(b.vx, b.vy, b.vz) + Math.hypot(b.wx, b.wy, b.wz) * b.radius;
+}
+
+/**
+ * Slip and roll speed of a manifold seen from one of its bodies (`a`, or
+ * `b` when `onB`), from the velocities after the step. Slip is the
+ * tangential relative velocity at the centroid of the contact plus the
+ * twist about the normal at the points' mean distance from it; roll is how
+ * much faster the body's centre moves along the surface than that, i.e. the
+ * motion that comes from turning over rather than slipping.
+ */
+function measureSlide(m: Manifold, onB: boolean, out: SlideMeasure): void {
+  const A = m.a;
+  const B = m.b;
+  const nx = m.nx;
+  const ny = m.ny;
+  const nz = m.nz;
+  let px = 0;
+  let py = 0;
+  let pz = 0;
+  let arm = 0;
+  for (const c of m.points) {
+    px += c.px;
+    py += c.py;
+    pz += c.pz;
+    arm += c.twistArm;
+  }
+  const inv = 1 / m.points.length;
+  px *= inv;
+  py *= inv;
+  pz *= inv;
+  arm *= inv;
+  // Velocity of each surface at the contact point.
+  let rx = px - A.px;
+  let ry = py - A.py;
+  let rz = pz - A.pz;
+  const avx = A.vx + A.wy * rz - A.wz * ry;
+  const avy = A.vy + A.wz * rx - A.wx * rz;
+  const avz = A.vz + A.wx * ry - A.wy * rx;
+  let bvx = B.vx;
+  let bvy = B.vy;
+  let bvz = B.vz;
+  if (B.dynamic) {
+    rx = px - B.px;
+    ry = py - B.py;
+    rz = pz - B.pz;
+    bvx += B.wy * rz - B.wz * ry;
+    bvy += B.wz * rx - B.wx * rz;
+    bvz += B.wx * ry - B.wy * rx;
+  }
+  let dx = avx - bvx;
+  let dy = avy - bvy;
+  let dz = avz - bvz;
+  let dn = dx * nx + dy * ny + dz * nz;
+  const linear = Math.hypot(dx - nx * dn, dy - ny * dn, dz - nz * dn);
+  const twist =
+    ((A.wx - B.wx) * nx + (A.wy - B.wy) * ny + (A.wz - B.wz) * nz) * arm;
+  const slip = Math.hypot(linear, twist);
+  // Centre of the body relative to the other surface at the contact.
+  if (onB) {
+    dx = B.vx - avx;
+    dy = B.vy - avy;
+    dz = B.vz - avz;
+  } else {
+    dx = A.vx - bvx;
+    dy = A.vy - bvy;
+    dz = A.vz - bvz;
+  }
+  dn = dx * nx + dy * ny + dz * nz;
+  const centre = Math.hypot(dx - nx * dn, dy - ny * dn, dz - nz * dn);
+  out.px = px;
+  out.py = py;
+  out.pz = pz;
+  out.slip = slip;
+  out.roll = Math.max(0, centre - slip);
 }
 
 /** Speed of the fastest point of the body (approximately). */

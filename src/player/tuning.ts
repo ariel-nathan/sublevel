@@ -22,6 +22,22 @@ export const GRAVITY = 20;
 export const JUMP_VELOCITY = Math.sqrt(2 * GRAVITY * PLAYER.jumpHeight);
 export const MAX_FALL_SPEED = 30;
 
+// --- Riding moving ground ------------------------------------------------------
+
+/**
+ * Dynamic bodies lighter than this are not ridden: under the player's 80 kg
+ * their motion is mostly a reaction to the player standing on them, and
+ * carrying the player along with it would feed that back.
+ */
+export const RIDE_MIN_MASS = 12;
+/**
+ * Dynamic ground slower than this counts as still, so the slight give of a
+ * loaded crate never makes the player creep.
+ */
+export const RIDE_DEADBAND = 0.05;
+/** Ground velocity taken from dynamic bodies is clamped to this speed. */
+export const RIDE_MAX_SPEED = 10;
+
 // --- Look and camera ---------------------------------------------------------
 
 /** Radians of turn per pixel of mouse movement. */

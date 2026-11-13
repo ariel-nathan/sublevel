@@ -78,6 +78,9 @@ export class Body {
   parent = 0;
   /** Set when something (a moving kinematic) must keep this body awake. */
   keepAwake = false;
+  /** Scratch for slidingContacts: best score and its contact. */
+  slideScore = 0;
+  slideContact: unknown = null;
 
   constructor(
     id: number,

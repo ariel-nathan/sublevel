@@ -17,9 +17,11 @@ import type {
   TextureImage,
 } from "../core/api";
 import { MATERIAL_IDS, MATERIALS, type MaterialId } from "../core/materials";
-import type { MeshData } from "../core/mesh";
+import type { MeshData, MeshImage } from "../core/mesh";
 import {
   buildMipChain,
+  checkMeshImage,
+  SharedResources,
   debugClearColor,
   FRAME_BYTES,
   FRAME_FLOATS,
@@ -70,6 +72,12 @@ interface GpuMesh {
   materialIndex: number;
   hasColors: boolean;
   emissive: boolean;
+  /** Texture bind group: the material's, or the mesh's own image. */
+  group: GPUBindGroup;
+  /** Draws are sorted by this so bind groups change rarely. */
+  groupKey: number;
+  /** The mesh's own image, released with the mesh. */
+  image?: MeshImage;
 }
 
 async function compileShader(
@@ -303,18 +311,16 @@ export async function createRenderer(
     lodMaxClamp: MAX_MIP_LEVEL,
   });
 
-  const materialIndex = new Map<MaterialId, number>();
-  const materialGroups: GPUBindGroup[] = [];
-  for (const id of MATERIAL_IDS) {
-    let image = options.textures.get(id);
-    if (!image) {
-      console.warn(`render: no texture for material ${id}; using a checker`);
-      image = missingTexture(id);
-    }
-    const levels = buildMipChain(image.size, image.pixels);
+  /** Uploads a square sRGB image with its full mip chain. */
+  function uploadTexture(
+    label: string,
+    size: number,
+    pixels: Uint8Array,
+  ): GPUTexture {
+    const levels = buildMipChain(size, pixels);
     const texture = device.createTexture({
-      label: `texture ${id}`,
-      size: [image.size, image.size],
+      label,
+      size: [size, size],
       mipLevelCount: levels.length,
       format: "rgba8unorm-srgb",
       usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
@@ -327,6 +333,18 @@ export async function createRenderer(
         [level.size, level.size],
       );
     });
+    return texture;
+  }
+
+  const materialIndex = new Map<MaterialId, number>();
+  const materialGroups: GPUBindGroup[] = [];
+  for (const id of MATERIAL_IDS) {
+    let image = options.textures.get(id);
+    if (!image) {
+      console.warn(`render: no texture for material ${id}; using a checker`);
+      image = missingTexture(id);
+    }
+    const texture = uploadTexture(`texture ${id}`, image.size, image.pixels);
     materialIndex.set(id, materialGroups.length);
     materialGroups.push(
       device.createBindGroup({
@@ -336,6 +354,28 @@ export async function createRenderer(
       }),
     );
   }
+
+  // Meshes with their own image (MeshData.image): one texture and bind group
+  // per image object, shared by every mesh created from it and freed with
+  // the last of them.
+  const meshImages = new SharedResources<
+    MeshImage,
+    { texture: GPUTexture; group: GPUBindGroup }
+  >(
+    (image) => {
+      checkMeshImage(image);
+      const texture = uploadTexture("mesh image", image.size, image.pixels);
+      return {
+        texture,
+        group: device.createBindGroup({
+          label: "mesh image",
+          layout: materialLayout,
+          entries: [{ binding: 0, resource: texture.createView() }],
+        }),
+      };
+    },
+    (value) => value.texture.destroy(),
+  );
 
   // --- Per-item storage (grows, never shrinks) ----------------------------
 
@@ -443,6 +483,9 @@ export async function createRenderer(
     if (material === undefined) {
       throw new Error(`render: unknown material ${String(data.material)}`);
     }
+    if (data.image) {
+      checkMeshImage(data.image);
+    }
     const interleaved = interleaveVertices(data);
     const vertices = device.createBuffer({
       label: `mesh ${nextMeshId} vertices`,
@@ -456,6 +499,14 @@ export async function createRenderer(
       usage: BufferUsage.INDEX | BufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(indices, 0, data.indices);
+    let group = materialGroups[material];
+    let groupKey = material;
+    if (data.image) {
+      const shared = meshImages.acquire(data.image);
+      group = shared.value.group;
+      // Own images sort after every material texture.
+      groupKey = materialGroups.length + shared.serial;
+    }
     const id = nextMeshId++;
     meshes.set(id, {
       vertices,
@@ -464,6 +515,9 @@ export async function createRenderer(
       materialIndex: material,
       hasColors: data.colors !== undefined,
       emissive: MATERIALS[data.material].emissive,
+      group,
+      groupKey,
+      image: data.image,
     });
     return { id };
   }
@@ -477,6 +531,9 @@ export async function createRenderer(
     // Safe even if a submitted frame still uses them: WebGPU defers the free.
     mesh.vertices.destroy();
     mesh.indices.destroy();
+    if (mesh.image) {
+      meshImages.release(mesh.image);
+    }
   }
 
   // --- Frame --------------------------------------------------------------
@@ -548,9 +605,7 @@ export async function createRenderer(
         drawMeshes.length * ITEM_FLOATS,
       );
     }
-    drawOrder.sort(
-      (a, b) => drawMeshes[a].materialIndex - drawMeshes[b].materialIndex,
-    );
+    drawOrder.sort((a, b) => drawMeshes[a].groupKey - drawMeshes[b].groupKey);
 
     const clear = debugClearColor(debugView, frame.fog.color);
     clearValue.r = clear.x;
@@ -572,12 +627,12 @@ export async function createRenderer(
     });
     scenePass.setPipeline(scenePipeline);
     scenePass.setBindGroup(0, frameGroup);
-    let boundMaterial = -1;
+    let boundGroup = -1;
     for (const slot of drawOrder) {
       const mesh = drawMeshes[slot];
-      if (mesh.materialIndex !== boundMaterial) {
-        boundMaterial = mesh.materialIndex;
-        scenePass.setBindGroup(1, materialGroups[boundMaterial]);
+      if (mesh.groupKey !== boundGroup) {
+        boundGroup = mesh.groupKey;
+        scenePass.setBindGroup(1, mesh.group);
       }
       scenePass.setVertexBuffer(0, mesh.vertices);
       scenePass.setIndexBuffer(mesh.indices, "uint32");

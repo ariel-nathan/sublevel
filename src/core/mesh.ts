@@ -7,6 +7,7 @@ import type { MaterialId } from "./materials";
  * - UVs are in tiles: 1.0 = one repeat of the texture; v grows downward.
  * - `colors`, when present, is baked lighting (linear RGB per vertex); the
  *   renderer uses it in place of lights that are marked `baked`.
+ * - `image`, when present, is drawn instead of the material's texture.
  */
 export interface MeshData {
   material: MaterialId;
@@ -19,6 +20,21 @@ export interface MeshData {
   /** Optional rgb per vertex. */
   colors?: Float32Array;
   indices: Uint32Array;
+  /**
+   * A texture for this mesh alone (square, power of two up to 256, RGBA8
+   * sRGB, row-major from the top-left), used instead of the material's
+   * texture; the material still decides surface kind and emissive. Meshes
+   * that share the same image object share one GPU texture.
+   */
+  image?: MeshImage;
+}
+
+/** Square RGBA8 sRGB image owned by one or more meshes. */
+export interface MeshImage {
+  /** Power of two, 1 to 256. */
+  size: number;
+  /** Length size*size*4. */
+  pixels: Uint8Array;
 }
 
 export interface Uv {

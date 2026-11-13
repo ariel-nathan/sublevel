@@ -7,6 +7,9 @@ import postWgsl from "./post.wgsl" with { type: "text" };
 import sceneWgsl from "./scene.wgsl" with { type: "text" };
 import {
   buildMipChain,
+  checkMeshImage,
+  MAX_MESH_IMAGE_SIZE,
+  SharedResources,
   computeInternalSize,
   DEBUG_DEPTH_RANGE,
   debugClearColor,
@@ -487,4 +490,57 @@ test("buildMipChain goes down to 1x1 and averages in linear light", () => {
 
 test("buildMipChain rejects a wrong byte count", () => {
   expect(() => buildMipChain(16, new Uint8Array(10))).toThrow();
+});
+
+test("mesh images must be square powers of two up to the limit, RGBA8", () => {
+  const image = (size: number, bytes = size * size * 4) => ({
+    size,
+    pixels: new Uint8Array(bytes),
+  });
+  for (const size of [1, 2, 16, 64, 128, MAX_MESH_IMAGE_SIZE]) {
+    expect(() => checkMeshImage(image(size))).not.toThrow();
+  }
+  for (const size of [0, 3, 48, 100, 512, 1.5, -4]) {
+    expect(() => checkMeshImage(image(size, 16))).toThrow();
+  }
+  expect(() => checkMeshImage(image(64, 64 * 64 * 3))).toThrow();
+});
+
+test("shared resources are created once per object and freed with the last user", () => {
+  const created: string[] = [];
+  const disposed: string[] = [];
+  const cache = new SharedResources<{ name: string }, string>(
+    (key) => {
+      created.push(key.name);
+      return `gpu:${key.name}`;
+    },
+    (value) => disposed.push(value),
+  );
+  const a = { name: "a" };
+  const b = { name: "b" };
+  const sameContent = { name: "a" };
+  const first = cache.acquire(a);
+  const second = cache.acquire(a);
+  expect(first.value).toBe("gpu:a");
+  expect(second.serial).toBe(first.serial);
+  const other = cache.acquire(b);
+  // Identity, not content: an equal but distinct object gets its own value.
+  const third = cache.acquire(sameContent);
+  expect(created).toEqual(["a", "b", "a"]);
+  expect(new Set([first.serial, other.serial, third.serial]).size).toBe(3);
+  expect(cache.size).toBe(3);
+  cache.release(a);
+  expect(disposed).toEqual([]);
+  cache.release(a);
+  expect(disposed).toEqual(["gpu:a"]);
+  cache.release(a); // extra releases are ignored
+  expect(disposed).toEqual(["gpu:a"]);
+  // Re-acquiring after the free creates it again with a fresh serial.
+  const again = cache.acquire(a);
+  expect(again.serial).toBeGreaterThan(third.serial);
+  cache.release(b);
+  cache.release(sameContent);
+  cache.release(a);
+  expect(cache.size).toBe(0);
+  expect(disposed.length).toBe(4);
 });

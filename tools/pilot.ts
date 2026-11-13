@@ -12,7 +12,7 @@
  *   console.log(pilot.transcript.join("\n"));
  */
 import { join } from "node:path";
-import { PROP_SPECS } from "../src/core/props";
+import { PLAYER, PROP_SPECS } from "../src/core/props";
 import type { GameSession } from "./browser";
 import {
   LOOK_SENSITIVITY,
@@ -26,6 +26,7 @@ import {
   lookToward,
   routeBetween,
   standPoint,
+  throwPitch,
   type Look,
   type Point2,
   type Point3,
@@ -37,6 +38,19 @@ const HOLD_DISTANCE = 1.15;
 const HOLD_CLEARANCE = 0.55;
 const HOLD_LOWER = 0.15;
 const STAND_EYE_HEIGHT = 1.65;
+// Throwing, also from src/player/tuning.ts.
+const THROW_SPEED_LIGHT = 11;
+const THROW_SPEED_HEAVY = 5;
+const THROW_LIGHT_MASS = 8;
+const THROW_UP = 1.0;
+
+/** Throw speed for a prop of this mass (src/player/tuning.ts throwSpeed). */
+function throwSpeed(mass: number): number {
+  const t =
+    (mass - THROW_LIGHT_MASS) / (PLAYER.maxCarryMass - THROW_LIGHT_MASS);
+  const k = clamp(t, 0, 1);
+  return THROW_SPEED_LIGHT + (THROW_SPEED_HEAVY - THROW_SPEED_LIGHT) * k;
+}
 
 export interface BodyInfo {
   id: number;
@@ -199,6 +213,32 @@ export class Pilot {
   async wait(steps: number): Promise<void> {
     await this.raw(steps);
     await this.note(`wait(${steps})`);
+  }
+
+  /**
+   * Runs idle steps, `every` at a time, until an event matching `match`
+   * happens (from now on), for at most `max` steps. Returns the event, or
+   * null if it did not happen.
+   */
+  async waitForEvent(
+    what: string,
+    match: (e: PilotEvent) => boolean,
+    max = 600,
+    every = 5,
+  ): Promise<PilotEvent | null> {
+    const since = (await this.state()).step;
+    let found: PilotEvent | null = null;
+    for (let n = 0; n <= max && !found; n += every) {
+      found = (await this.events(since)).find(match) ?? null;
+      if (!found) {
+        await this.raw(every);
+      }
+    }
+    await this.note(
+      `waitForEvent(${what})`,
+      found ? `${found.type}@${found.step}` : "TIMED OUT",
+    );
+    return found;
   }
 
   // --- Looking ---------------------------------------------------------------
@@ -503,6 +543,101 @@ export class Pilot {
       pressed ? "pressed" : "NO button_press event",
     );
     return pressed;
+  }
+
+  /**
+   * Turns the view so that the held body's hold point is at (x, y, z) as
+   * nearly as the hold distance allows: faces (x, z) and tilts so the body
+   * hangs at height `y`. Waits `settle` steps for the body to get there.
+   */
+  async holdOver(x: number, y: number, z: number, settle = 15): Promise<void> {
+    const state = await this.state();
+    const held = state.player.heldBody;
+    if (held === null) {
+      this.log("holdOver: nothing held");
+      return;
+    }
+    const distance = this.holdDistance(state, held);
+    const eye = await this.eye();
+    const sinPitch = (y + HOLD_LOWER - eye.y) / distance;
+    const pitchDeg = (Math.asin(clamp(sinPitch, -1, 1)) * 180) / Math.PI;
+    const yaw = lookToward(eye, { x, y: eye.y, z }).yawDeg;
+    await this.look(yaw, pitchDeg, true);
+    await this.raw(settle);
+    const body = (await this.bodies()).find((b) => b.id === held);
+    await this.note(
+      `holdOver(${f(x)}, ${f(y)}, ${f(z)})`,
+      `body at ${body ? fmt(body.position) : "?"}`,
+    );
+  }
+
+  /** Lets go of the held body (use key) and waits for it to land. */
+  async release(wait = 30): Promise<boolean> {
+    const held = (await this.state()).player.heldBody;
+    await this.raw(1, { usePressed: true });
+    await this.raw(wait);
+    const body = (await this.bodies()).find((b) => b.id === held);
+    const after = (await this.state()).player.heldBody;
+    await this.note(
+      "release()",
+      `body at ${body ? fmt(body.position) : "?"}${after === null ? "" : " STILL HELD"}`,
+    );
+    return after === null;
+  }
+
+  /**
+   * Throws the held body so that its arc passes through (x, y, z): faces
+   * the point, then solves the pitch for a ballistic arc from where the
+   * body actually hangs (throw speed and lift from src/player/tuning.ts),
+   * re-aiming a few times as the hold point moves with the pitch.
+   */
+  async throwAt(x: number, y: number, z: number): Promise<boolean> {
+    const state = await this.state();
+    const held = state.player.heldBody;
+    if (held === null) {
+      this.log("throwAt: nothing held");
+      return false;
+    }
+    const tag = state.bodies.find((b) => b.id === held)?.tag ?? "";
+    const spec = PROP_SPECS[tag as keyof typeof PROP_SPECS];
+    const speed = throwSpeed(spec ? spec.mass : PLAYER.maxCarryMass);
+    let pitch = 20;
+    for (let i = 0; i < 4; i++) {
+      const eye = await this.eye();
+      const yaw = lookToward(eye, { x, y: eye.y, z }).yawDeg;
+      const body = (await this.bodies()).find((b) => b.id === held);
+      if (!body) {
+        break;
+      }
+      const solved = throwPitch(
+        horizontalDistance(body.position, { x, z }),
+        y - body.position.y,
+        speed,
+        THROW_UP,
+      );
+      if (solved === null) {
+        this.log(`throwAt: (${f(x)}, ${f(y)}, ${f(z)}) is out of range`);
+        return false;
+      }
+      pitch = solved;
+      await this.look(yaw, pitch, true);
+      await this.raw(12);
+    }
+    await this.raw(1, { primaryPressed: true });
+    await this.note(
+      `throwAt(${f(x)}, ${f(y)}, ${f(z)})`,
+      `pitch ${f(pitch, 1)} speed ${f(speed, 1)}`,
+    );
+    return true;
+  }
+
+  private holdDistance(state: PilotState, held: number): number {
+    const tag = state.bodies.find((b) => b.id === held)?.tag ?? "";
+    const spec = PROP_SPECS[tag as keyof typeof PROP_SPECS];
+    const radius = spec
+      ? Math.hypot(spec.halfExtents.x, spec.halfExtents.y, spec.halfExtents.z)
+      : 0.5;
+    return Math.max(HOLD_DISTANCE, radius + HOLD_CLEARANCE);
   }
 
   // --- Seeing ----------------------------------------------------------------

@@ -157,7 +157,11 @@ function rayAt(
 
 /** Draw items every rig has besides props: doors, plate parts, button parts. */
 const EXTRA_ITEMS =
-  LEVEL.doors.length + LEVEL.plates.length * 2 + LEVEL.buttons.length * 2;
+  LEVEL.doors.length +
+  LEVEL.plates.length * 2 +
+  LEVEL.buttons.reduce((n, b) => n + buttonParts(b).length, 0);
+/** Impact targets in the level: each adds a hazard-striped ring part. */
+const IMPACT_UNITS = LEVEL.buttons.filter((b) => b.mode === "impact").length;
 const PLATE = LEVEL.plates[0];
 const PLATE_CENTRE = v3.scale(v3.add(PLATE.box.min, PLATE.box.max), 0.5);
 const DOOR_A = LEVEL.doors[0];
@@ -401,13 +405,20 @@ describe("buttons and door A", () => {
         .map((i) => rig.meshes[i.mesh.id].material)
         .filter((m) => m === "button_red" || m === "button_green");
     };
-    expect(colourOf()).toEqual(["button_red", "button_red"]);
+    // Door A's two buttons turn green with it; the level's other buttons
+    // stay red.
+    const allRed = LEVEL.buttons.map(() => "button_red");
+    const doorAGreen = LEVEL.buttons.map((b) =>
+      b.target === DOOR_A.id ? "button_green" : "button_red",
+    );
+    expect(doorAGreen.filter((m) => m === "button_green").length).toBe(2);
+    expect(colourOf()).toEqual(allRed);
     rig.world.use(hit);
     rig.run(0.1);
-    expect(colourOf()).toEqual(["button_green", "button_green"]);
+    expect(colourOf()).toEqual(doorAGreen);
     rig.world.use(hit);
     rig.run(0.1);
-    expect(colourOf()).toEqual(["button_red", "button_red"]);
+    expect(colourOf()).toEqual(allRed);
   });
 
   test("describe strings", () => {
@@ -510,7 +521,7 @@ describe("pressure plate", () => {
         })
         .map((i) => i.transform[13]);
     const rest = plateY();
-    expect(rest.length).toBe(2);
+    expect(rest.length).toBe(2 + IMPACT_UNITS);
     rig.physics.setBodyPose(
       bodyTagged(rig.physics, "crate_metal"),
       onPlate("crate_metal"),
@@ -829,10 +840,7 @@ describe("drawItems", () => {
       monitor: 2,
     };
     const expected =
-      LEVEL.props.reduce((sum, p) => sum + parts[p.kind], 0) +
-      LEVEL.doors.length +
-      LEVEL.plates.length * 2 +
-      LEVEL.buttons.length * 2;
+      LEVEL.props.reduce((sum, p) => sum + parts[p.kind], 0) + EXTRA_ITEMS;
     const items = rig.world.drawItems(0.5);
     expect(items.length).toBe(expected);
     for (const item of items) {
@@ -1011,8 +1019,8 @@ describe("fixture geometry", () => {
         expect(front - wall).toBeGreaterThanOrEqual(0.005);
         expect(Math.abs(back - wall)).toBeGreaterThanOrEqual(0.005);
       }
-      // The knob's cap is the button face.
-      const knob = buttonParts(def)[1].box;
+      // The knob's cap (the last part) is the button face.
+      const knob = buttonParts(def).at(-1)!.box;
       const cap = Math.max(v3.dot(knob.min, f), v3.dot(knob.max, f));
       expect(cap).toBeCloseTo(v3.dot(def.position, f), 9);
     }

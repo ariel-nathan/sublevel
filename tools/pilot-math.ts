@@ -138,24 +138,64 @@ export function standPoint(
 }
 
 // --- Routes through the level --------------------------------------------------
-// The level is a chain: lab, door A, corridor, bend, corridor south, storage.
+// The level is a chain: lab, door A, corridor, bend, corridor south, storage,
+// door B into the filtration hall, round the grate screen into the service
+// lane, door T into the valve chamber, the exit door into the egress lock.
 // Walking straight between rooms would hit walls, so routes follow this spine.
 
 export interface Waypoint extends Point2 {
   name: string;
 }
 
-export const SPINE: readonly Waypoint[] = [
+/** A zone's anchor, and the points to pass on the way in from the zone before. */
+export interface SpinePoint extends Waypoint {
+  via?: readonly Waypoint[];
+}
+
+export const SPINE: readonly SpinePoint[] = [
   { name: "lab", x: 3, z: 0 },
   { name: "door_a", x: 4.15, z: 0 },
   { name: "corridor", x: 6.5, z: 0 },
   { name: "bend", x: 9.55, z: 0 },
   { name: "corridor_south", x: 9.55, z: 6.5 },
   { name: "storage_door", x: 9.55, z: 8.6 },
+  {
+    name: "hall",
+    x: 14.6,
+    z: 12,
+    via: [{ name: "door_b_approach", x: 12.9, z: 12 }],
+  },
+  {
+    name: "lane",
+    x: 14.85,
+    z: 10.2,
+    via: [{ name: "screen_end", x: 14.85, z: 11.75 }],
+  },
+  {
+    name: "chamber",
+    x: 26.3,
+    z: 9.6,
+    via: [{ name: "door_t_approach", x: 24.4, z: 9.6 }],
+  },
+  {
+    name: "lock",
+    x: 32.3,
+    z: 9.8,
+    via: [{ name: "exit_door_approach", x: 30.6, z: 9.8 }],
+  },
 ];
 
 /** Index into SPINE of the zone a position belongs to. */
 export function zoneOf(p: Point2): number {
+  if (p.x >= 31.55) {
+    return 9;
+  }
+  if (p.x >= 25.25) {
+    return 8;
+  }
+  if (p.x >= 13.65) {
+    return p.z < 10.95 ? 7 : 6;
+  }
   if (p.x < 4) {
     return 0;
   }
@@ -173,16 +213,73 @@ export function zoneOf(p: Point2): number {
 
 /**
  * Intermediate points to walk through from `from` to `to`. Within one zone
- * this is empty (walk straight). Going forward it ends at the destination
- * zone's anchor; going back it starts at the source zone's anchor.
+ * this is empty (walk straight). Going forward it passes each next zone's
+ * `via` points and anchor; going back it retraces them in reverse.
  */
 export function routeBetween(from: Point2, to: Point2): Waypoint[] {
   const a = zoneOf(from);
   const b = zoneOf(to);
-  if (a === b) {
-    return [];
+  const out: Waypoint[] = [];
+  const strip = (p: SpinePoint): Waypoint => ({
+    name: p.name,
+    x: p.x,
+    z: p.z,
+  });
+  if (a < b) {
+    for (let k = a + 1; k <= b; k++) {
+      out.push(...(SPINE[k].via ?? []), strip(SPINE[k]));
+    }
+  } else {
+    for (let k = a; k > b; k--) {
+      out.push(strip(SPINE[k]), ...[...(SPINE[k].via ?? [])].reverse());
+    }
   }
-  return a < b
-    ? SPINE.slice(a + 1, b + 1)
-    : SPINE.slice(b + 1, a + 1).reverse();
+  return out;
+}
+
+// --- Throwing ------------------------------------------------------------------
+
+/**
+ * Pitch (degrees) at which to throw so that a prop released at height 0
+ * passes through a point `distance` metres away horizontally and `rise`
+ * metres up, flying at `speed` along the view plus `up` m/s straight up,
+ * under gravity `g`. The flatter of the two arcs; null if out of range.
+ */
+export function throwPitch(
+  distance: number,
+  rise: number,
+  speed: number,
+  up: number,
+  g = 9.81,
+): number | null {
+  const heightAt = (deg: number): number => {
+    const a = deg * DEG;
+    const vx = speed * Math.cos(a);
+    const vy = speed * Math.sin(a) + up;
+    const t = distance / vx;
+    return vy * t - (g * t * t) / 2;
+  };
+  // Height at the target rises with pitch up to the highest arc, then falls.
+  let lo = -60;
+  let hi = -60;
+  let best = heightAt(hi);
+  for (let deg = -60; deg <= 80; deg += 0.5) {
+    const h = heightAt(deg);
+    if (h > best) {
+      best = h;
+      hi = deg;
+    }
+  }
+  if (best < rise || heightAt(lo) > rise) {
+    return null;
+  }
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (heightAt(mid) < rise) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return (lo + hi) / 2;
 }

@@ -1,4 +1,5 @@
 import type {
+  AcousticZone,
   Brush,
   ButtonDef,
   DoorDef,
@@ -11,10 +12,14 @@ import type {
 } from "../core/api";
 import type { MaterialId } from "../core/materials";
 import { PROP_SPECS } from "../core/props";
+import { buildFiltrationHall } from "./rooms/filtration-hall";
+import type { Connector } from "./rooms/room";
 
 /**
- * "Kestrel Annex": a lab, a service corridor with one bend, and a storage
- * room with a pressure-plate puzzle that opens the exit alcove.
+ * "Kestrel Annex": a lab, a service corridor with one bend, a storage room
+ * with a pressure-plate puzzle that holds door B open, then the filtration
+ * hall (timed door), the valve chamber (impact target) and the egress lock
+ * with the exit (src/level/rooms/filtration-hall.ts).
  *
  * Layout (top-down, +X right, +Z down the page, metres):
  *
@@ -23,16 +28,34 @@ import { PROP_SPECS } from "../core/props";
  *   corridor     x 4.3..10.8, z -1.25..1.25, then x 8.3..10.8, z 1.25..7.7
  *   storage      x 5.5..13.5, z 8..16,    ceiling 4.0
  *   door B       x 13.5..13.8, z 11.3..12.7 (held open by the plate)
- *   exit alcove  x 13.8..15.8, z 11..13,  ceiling 3.0
+ *   hall         x 14.1..25.1, z 8..16,   ceiling 4.5; service lane z 8..10.9
+ *   door T       x 25.1..25.4, z 8.9..10.9 (timed button at x 25.1, z 13)
+ *   chamber      x 25.4..31.4, z 7..12.6, ceiling 5.0
+ *   exit door    x 31.4..31.7, z 9.1..10.5 (impact target 4.2 m up over it)
+ *   egress lock  x 31.7..34.7, z 8.3..11.3, ceiling 3.0 (exit x >= 32.7)
  */
 
 const WALL = 0.3;
+
+/** Width of the hazard bands that frame doorways. */
+const BAND = 0.15;
 
 /**
  * Distance from the wall surface to a button's face (its `position`). Must
  * match the depth of the world objects' button model (src/props/meshes.ts).
  */
 export const BUTTON_DEPTH = 0.06;
+
+/** The same for an impact target (src/props/meshes.ts IMPACT_DEPTH). */
+export const IMPACT_BUTTON_DEPTH = 0.07;
+
+/** Door B's doorway, seen from the storage room's far side: the new hall. */
+export const HALL_CONNECTOR: Connector = {
+  position: { x: 13.8, y: 0, z: 12 },
+  facing: { x: 1, y: 0, z: 0 },
+  width: 1.4,
+  height: 2.4,
+};
 
 /**
  * How far a door slab is inset from each face of its wall. The slab is
@@ -144,15 +167,15 @@ export function defineLevel(): LevelData {
   ): void => {
     const xa = dir > 0 ? face : face - 0.1;
     const xb = dir > 0 ? face + 0.1 : face;
-    box(xa, 0, zc - halfW - 0.2, xb, height, zc - halfW, "hazard_stripe");
-    box(xa, 0, zc + halfW, xb, height, zc + halfW + 0.2, "hazard_stripe");
+    box(xa, 0, zc - halfW - BAND, xb, height, zc - halfW, "hazard_stripe");
+    box(xa, 0, zc + halfW, xb, height, zc + halfW + BAND, "hazard_stripe");
     box(
       xa,
       height,
-      zc - halfW - 0.2,
+      zc - halfW - BAND,
       xb,
-      height + 0.2,
-      zc + halfW + 0.2,
+      height + BAND,
+      zc + halfW + BAND,
       "hazard_stripe",
     );
   };
@@ -193,14 +216,17 @@ export function defineLevel(): LevelData {
     radius: number,
     intensity: number,
     flicker: LightDef["flicker"] = "none",
+    bounds?: LightDef["bounds"],
   ): void => {
-    lights.push({
+    const def: LightDef = {
       position: v(x, y, z),
       color: v(color[0], color[1], color[2]),
       radius,
       intensity,
       flicker,
-    });
+    };
+    if (bounds) def.bounds = bounds;
+    lights.push(def);
   };
 
   /** Prop resting with its bottom at `baseY`. */
@@ -299,7 +325,7 @@ export function defineLevel(): LevelData {
 
   // Lights: three recessed panels, steady cool white.
   for (const cx of [-2.4, 0, 2.4]) {
-    fixture(cx, 0, 3, 0.6, 0.25);
+    fixture(cx, 0, 3, 0.6, 0.3);
     light(cx, 2.6, 0, [0.85, 0.92, 1.0], 7.5, 1.2);
   }
   // Ceiling beams.
@@ -442,8 +468,19 @@ export function defineLevel(): LevelData {
   fixture(9.55, 0, 2.8, 0.3, 0.1);
   fixture(9.55, 5, 2.8, 0.3, 0.1, "metal_panel");
   light(5.9, 2.4, 0, [1.0, 0.78, 0.5], 6.5, 1.1);
-  light(9.55, 2.4, 0, [0.9, 0.95, 1.0], 6.5, 1.3, "fluorescent");
-  light(9.55, 2.4, 5, [1.0, 0.85, 0.6], 5.5, 1.0, "broken");
+  // The two dynamic lights are confined to the corridor (they have no
+  // shadows). The tube at the bend lights the bend and spills 0.5 m through
+  // door A; its box stops at the pit's edge, so it can reach below the floor
+  // without lighting the pit. The broken lamp hangs over the grate: its box
+  // stops at the floor plane so nothing under the grate is lit by it.
+  light(9.55, 2.4, 0, [0.9, 0.95, 1.0], 6.5, 1.3, "fluorescent", {
+    min: v(3.5, -WALL, -1.55),
+    max: v(11.1, 3.1, PIT.z0),
+  });
+  light(9.55, 2.4, 5, [1.0, 0.85, 0.6], 5.5, 1.0, "broken", {
+    min: v(8.0, -0.02, 0.95),
+    max: v(11.1, 3.1, 8.5),
+  });
 
   // Storage doorway frame on the corridor end.
   box(8.1, 0, 8, 8.3, 2.8, 8.1, "hazard_stripe");
@@ -510,21 +547,8 @@ export function defineLevel(): LevelData {
   box(5.5, 1.3, 13.8, 8.5, 1.4, 16, "metal_grate");
   box(5.5, 0.3, 13.74, 8.5, 0.6, 13.8, "hazard_stripe");
 
-  // Door B frame (storage side) and doorway frame details.
+  // Door B frame, storage side (the hall frames its own side).
   frameX(13.5, -1, 12, 0.7, 2.4);
-  frameX(13.8, 1, 12, 0.7, 2.4);
-
-  // Exit alcove: x 13.8..15.8, z 11..13, ceiling 3.0.
-  box(13.8, -WALL, 11, 15.8, 0, 13, "lab_floor_tile");
-  box(13.8, 3, 11, 15.8, 3.3, 13, "metal_panel");
-  wallAlongX(13.8, 16.1, 10.7, 11, -WALL, 3.3, "metal_panel");
-  wallAlongX(13.8, 16.1, 13, 13.3, -WALL, 3.3, "metal_panel");
-  wallAlongZ(15.8, 16.1, 11, 13, -WALL, 3.3, "metal_panel");
-  box(15.76, 1, 11.5, 15.8, 2, 12.5, "monitor_screen");
-  box(14.5, 1, 11, 15.5, 2, 11.04, "sign_warning");
-  box(14.5, 1, 12.96, 15.5, 2, 13, "sign_warning");
-  fixture(14.8, 12, 3, 0.3, 0.3, "button_green");
-  light(14.8, 2.55, 12, [0.35, 1.0, 0.45], 4.5, 1.6);
 
   // The corridor pit's red pilot lamp: steady and dim, glowing up through
   // the grate. Last in the list so that the other lights keep their index.
@@ -606,6 +630,38 @@ export function defineLevel(): LevelData {
     { sound: "ambient_drone", position: v(9.55, 1.5, 2), gain: 0.4 },
   ];
 
+  // Acoustic zones of the first three rooms; they overlap a little in the
+  // doorways (the game switches with hysteresis).
+  const zones: AcousticZone[] = [
+    { box: { min: v(-4, 0, -3), max: v(4.15, 3, 3) }, room: "lab" },
+    {
+      box: { min: v(4.15, PIT.floor, -1.25), max: v(10.8, 2.8, 1.25) },
+      room: "corridor",
+    },
+    {
+      box: { min: v(8.3, PIT.floor, 1.25), max: v(10.8, 2.8, 7.85) },
+      room: "corridor",
+    },
+    { box: { min: v(5.5, 0, 7.85), max: v(13.65, 4, 16) }, room: "hall" },
+  ];
+
+  // -------------------------------------------------------------------------
+  // Beyond door B: the filtration hall, valve chamber and egress lock.
+  // -------------------------------------------------------------------------
+  const hall = buildFiltrationHall(
+    {
+      box: (min, max, material) =>
+        box(min.x, min.y, min.z, max.x, max.y, max.z, material),
+      light: (def) => lights.push(def),
+      prop: (kind, base, yaw) => prop(kind, base.x, base.y, base.z, yaw),
+      door: (def) => doors.push(def),
+      button: (def) => buttons.push(def),
+      emitter: (def) => emitters.push(def),
+      zone: (z) => zones.push(z),
+    },
+    HALL_CONNECTOR,
+  );
+
   return {
     name: "Kestrel Annex",
     brushes,
@@ -618,8 +674,7 @@ export function defineLevel(): LevelData {
     emitters,
     ambient: v(0.07, 0.075, 0.09),
     fog: { color: v(0.07, 0.09, 0.11), near: 12, far: 40 },
-    // The exit alcove beyond door B.
-    exit: { min: v(14.2, 0, 11), max: v(15.8, 3, 13) },
-    zones: [],
+    exit: hall.exit,
+    zones,
   };
 }

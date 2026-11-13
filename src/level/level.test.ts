@@ -6,7 +6,14 @@ import { PLAYER, PROP_SPECS } from "../core/props";
 import { AirGrid } from "./airgrid";
 import { LightBaker, SEE_THROUGH_OPACITY } from "./bake";
 import { coplanarOverlaps, describeOverlap, levelRects } from "./coplanar";
-import { BUTTON_DEPTH, DOOR_INSET, GRATE_THICKNESS, PIT } from "./define";
+import {
+  BUTTON_DEPTH,
+  DOOR_INSET,
+  GRATE_THICKNESS,
+  HALL_CONNECTOR,
+  IMPACT_BUTTON_DEPTH,
+  PIT,
+} from "./define";
 import {
   boxesOverlap,
   boxOf,
@@ -30,6 +37,7 @@ import {
   SEE_THROUGH_MATERIALS,
 } from "./meshgen";
 import { TriangleGrid } from "./raymesh";
+import { describeFiltrationHall } from "./rooms/filtration-hall";
 
 const start = performance.now();
 const level = buildLevel();
@@ -40,6 +48,79 @@ const brushes = data.brushes.map(boxOf);
 const propBoxes = data.props.map(propBox);
 const doorBoxes = data.doors.map((d) => boxOf(d.closed));
 const brushIndex = new BoxIndex(brushes);
+const HALL = describeFiltrationHall(HALL_CONNECTOR);
+
+/** Run speed of the player (src/player/tuning.ts RUN_SPEED). */
+const RUN_SPEED = 5.6;
+/** Sliding door kinematics (src/props/doors.ts): cruise speed and acceleration. */
+const DOOR_SPEED = 1.6;
+const DOOR_ACCEL = 8;
+
+/** Cell size of the walkability flood fill. */
+const CELL = 0.25;
+
+/**
+ * Cells (keys "ix,iz") a standing box of the given half-width and height can
+ * walk to from the spawn, ignoring props, with `extra` boxes as obstacles
+ * (for example closed door slabs).
+ */
+function walkFlood(
+  half: number,
+  height: number,
+  extra: Box[] = [],
+): Set<string> {
+  const index = new BoxIndex([...brushes, ...extra]);
+  const free = (ix: number, iz: number): boolean => {
+    const x = ix * CELL;
+    const z = iz * CELL;
+    return (
+      index.overlapping({
+        x0: x - half,
+        x1: x + half,
+        y0: PLAYER.stepHeight + 0.01,
+        y1: height,
+        z0: z - half,
+        z1: z + half,
+      }).length === 0
+    );
+  };
+  const spawn = data.playerSpawn.position;
+  const sx = Math.round(spawn.x / CELL);
+  const sz = Math.round(spawn.z / CELL);
+  const seen = new Set<string>([`${sx},${sz}`]);
+  const queue: [number, number][] = [[sx, sz]];
+  while (queue.length > 0) {
+    const [ix, iz] = queue.pop()!;
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      const nx = ix + dx;
+      const nz = iz + dz;
+      const key = `${nx},${nz}`;
+      if (nx < -30 || nx > 160 || nz < -40 || nz > 80 || seen.has(key))
+        continue;
+      if (!free(nx, nz)) continue;
+      seen.add(key);
+      queue.push([nx, nz]);
+    }
+  }
+  return seen;
+}
+
+const cellsOf = (set: Set<string>): [number, number][] =>
+  [...set].map((k) => {
+    const [i, j] = k.split(",").map(Number);
+    return [i * CELL, j * CELL];
+  });
+
+const reaches = (set: Set<string>, x: number, z: number): boolean =>
+  set.has(`${Math.round(x / CELL)},${Math.round(z / CELL)}`);
+
+/** Player-sized walk with every door open (doors are not brushes). */
+const WALK = walkFlood(PLAYER.halfWidth, PLAYER.standHeight);
 
 function shifted(b: Box, o: { x: number; y: number; z: number }): Box {
   return {
@@ -195,28 +276,35 @@ describe("doors, buttons and plates", () => {
     }
   });
 
-  test("buttons are on a wall at about 1.2 m, facing out of it", () => {
+  test("buttons are on a wall at about 1.2 m (targets high up), facing out of it", () => {
     for (const b of data.buttons) {
-      expect(b.position.y).toBeGreaterThan(1.0);
-      expect(b.position.y).toBeLessThan(1.4);
+      const impact = b.mode === "impact";
+      if (impact) {
+        expect(b.position.y).toBeGreaterThan(3.5);
+      } else {
+        expect(b.position.y).toBeGreaterThan(1.0);
+        expect(b.position.y).toBeLessThan(1.4);
+      }
       expect(v3.length(b.facing)).toBeCloseTo(1);
-      // The wall surface is exactly BUTTON_DEPTH behind the button face, and
-      // nothing of the level occupies the space of the button unit (the world
-      // objects own all of its geometry).
-      const behind = v3.addScaled(b.position, b.facing, -BUTTON_DEPTH - 0.001);
+      // The wall surface is exactly the unit's depth behind the button face,
+      // and nothing of the level occupies the space of the button unit (the
+      // world objects own all of its geometry).
+      const depth = impact ? IMPACT_BUTTON_DEPTH : BUTTON_DEPTH;
+      const halfSize = impact ? 0.17 : 0.15;
+      const behind = v3.addScaled(b.position, b.facing, -depth - 0.001);
       expect(
         brushes.some((x) => containsPoint(x, behind.x, behind.y, behind.z)),
       ).toBe(true);
       const f = b.facing;
       const unit: Box = {
-        x0: b.position.x - (f.x !== 0 ? 0 : 0.15),
-        x1: b.position.x + (f.x !== 0 ? 0 : 0.15),
-        y0: b.position.y - 0.15,
-        y1: b.position.y + 0.15,
-        z0: b.position.z - (f.z !== 0 ? 0 : 0.15),
-        z1: b.position.z + (f.z !== 0 ? 0 : 0.15),
+        x0: b.position.x - (f.x !== 0 ? 0 : halfSize),
+        x1: b.position.x + (f.x !== 0 ? 0 : halfSize),
+        y0: b.position.y - halfSize,
+        y1: b.position.y + halfSize,
+        z0: b.position.z - (f.z !== 0 ? 0 : halfSize),
+        z1: b.position.z + (f.z !== 0 ? 0 : halfSize),
       };
-      const wallward = v3.addScaled(b.position, f, -BUTTON_DEPTH + 0.0005);
+      const wallward = v3.addScaled(b.position, f, -depth + 0.0005);
       const span: Box = {
         x0: Math.min(unit.x0, wallward.x),
         x1: Math.max(unit.x1, wallward.x),
@@ -326,7 +414,7 @@ describe("props", () => {
   test("prop inventory", () => {
     const count = (k: string) => data.props.filter((p) => p.kind === k).length;
     expect(count("monitor")).toBeGreaterThanOrEqual(2);
-    expect(count("chair")).toBe(2);
+    expect(count("chair")).toBeGreaterThanOrEqual(2);
     expect(count("barrel")).toBeGreaterThanOrEqual(2);
     expect(count("crate_weak")).toBeGreaterThanOrEqual(2);
     expect(count("crate_wood_small")).toBeGreaterThanOrEqual(3);
@@ -441,10 +529,15 @@ describe("spawn and sealing", () => {
     expect(closed.leaks).toBe(false);
     const open = new AirGrid(brushes, seed);
     expect(open.leaks).toBe(false);
-    // Door B closed cuts the alcove off; open it and the air grows.
+    // Door B closed cuts the hall off; open it and the air grows.
     expect(open.reachedCount).toBeGreaterThan(closed.reachedCount);
     expect(open.reachable(14.8, 1.5, 12)).toBe(true);
     expect(closed.reachable(14.8, 1.5, 12)).toBe(false);
+    const e = data.exit;
+    const ex = (e.min.x + e.max.x) / 2;
+    const ez = (e.min.z + e.max.z) / 2;
+    expect(open.reachable(ex, 1.5, ez)).toBe(true);
+    expect(closed.reachable(ex, 1.5, ez)).toBe(false);
   });
 
   test("walls, floors and ceilings are at least 0.2 m thick", () => {
@@ -468,49 +561,7 @@ describe("spawn and sealing", () => {
 });
 
 describe("walkability", () => {
-  const cell = 0.25;
-  function flood(half: number, height: number): Set<string> {
-    const free = (ix: number, iz: number): boolean => {
-      const x = ix * cell;
-      const z = iz * cell;
-      const body: Box = {
-        x0: x - half,
-        x1: x + half,
-        y0: PLAYER.stepHeight + 0.01,
-        y1: height,
-        z0: z - half,
-        z1: z + half,
-      };
-      return !brushes.some((b) => boxesOverlap(body, b, 1e-6));
-    };
-    const spawn = data.playerSpawn.position;
-    const sx = Math.round(spawn.x / cell);
-    const sz = Math.round(spawn.z / cell);
-    const seen = new Set<string>([`${sx},${sz}`]);
-    const queue: [number, number][] = [[sx, sz]];
-    while (queue.length > 0) {
-      const [ix, iz] = queue.pop()!;
-      for (const [dx, dz] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ]) {
-        const nx = ix + dx;
-        const nz = iz + dz;
-        const key = `${nx},${nz}`;
-        if (nx < -30 || nx > 80 || nz < -30 || nz > 80 || seen.has(key))
-          continue;
-        if (!free(nx, nz)) continue;
-        seen.add(key);
-        queue.push([nx, nz]);
-      }
-    }
-    return seen;
-  }
-  const reaches = (set: Set<string>, x: number, z: number) =>
-    set.has(`${Math.round(x / cell)},${Math.round(z / cell)}`);
-
+  const flood = walkFlood;
   const checkpoints: [string, number, number][] = [
     ["lab centre", 0, -1.5],
     ["lab by door button", 3, 1.2],
@@ -523,7 +574,16 @@ describe("walkability", () => {
     ["pressure plate", 8.5, 12],
     ["storage far corner", 12.5, 13],
     ["door B", 13.65, 12],
-    ["exit alcove", 14.75, 12],
+    ["hall entry", 14.75, 12],
+    ["hall lane entrance", 14.85, 10.4],
+    ["hall lane by door T", 24.6, 9.9],
+    ["hall timed button", 23.8, 13],
+    ["hall by the vessels", 19.5, 12.8],
+    ["door T", 25.25, 9.9],
+    ["chamber", 28.5, 9.8],
+    ["chamber under the target", 30.9, 9.8],
+    ["exit door", 31.65, 9.8],
+    ["egress lock", 33.7, 9.8],
   ];
 
   test("player-sized walk from the spawn reaches every room", () => {
@@ -765,9 +825,17 @@ describe("visible geometry", () => {
         air.reachable(x, y, z) && brushIndex.overlapping(probe).length === 0
       );
     };
-    for (let x = -3.987; x < 16; x += 0.45) {
+    for (let x = -3.987; x < 35; x += 0.45) {
       for (let z = -2.991; z < 16.3; z += 0.45) {
-        for (const y of [0.12, 0.9, 1.6, 2.1, 2.9, 3.6]) {
+        for (const y of [0.12, 0.9, 1.6, 2.1, 2.9, 3.6, 4.35]) {
+          if (clear(x, y, z)) points.push([x, y, z]);
+        }
+      }
+    }
+    // Through the screen's slot, and right against the screen.
+    for (let x = 15.95; x < 25; x += 0.6) {
+      for (const z of [10.85, 11.05]) {
+        for (const y of [1.6, 1.9, 2.15]) {
           if (clear(x, y, z)) points.push([x, y, z]);
         }
       }
@@ -790,13 +858,13 @@ describe("visible geometry", () => {
       }
     }
     for (const [x, z] of [
-      [14.2, 11.4],
-      [15.4, 12.6],
-      [14.8, 12],
+      [32.0, 8.6],
+      [34.4, 11.0],
+      [32.9, 9.8],
     ]) {
       for (const y of [0.2, 1.5, 2.7]) points.push([x, y, z]);
     }
-    expect(points.length).toBeGreaterThan(1500);
+    expect(points.length).toBeGreaterThan(3000);
 
     const rays = 64;
     const failures: string[] = [];
@@ -1125,5 +1193,358 @@ describe("light baking through see-through brushes", () => {
       0,
     );
     expect(under[0]).toBeCloseTo(underOpen[0] * (1 - SEE_THROUGH_OPACITY), 6);
+  });
+});
+
+describe("acoustic zones and light bounds", () => {
+  test("every walkable floor cell lies in an acoustic zone", () => {
+    const zones = data.zones.map((z) => boxOf(z.box));
+    expect(zones.length).toBeGreaterThanOrEqual(7);
+    const outside = cellsOf(WALK).filter(
+      ([x, z]) => !zones.some((b) => containsPoint(b, x, 0.9, z)),
+    );
+    expect(outside.slice(0, 10)).toEqual([]);
+  });
+
+  test("zones have the right characters", () => {
+    const at = (x: number, y: number, z: number) =>
+      data.zones
+        .filter((zone) => containsPoint(boxOf(zone.box), x, y, z))
+        .map((zone) => zone.room);
+    expect(at(0, 1.5, 0)).toEqual(["lab"]);
+    expect(at(6, 1.5, 0)).toEqual(["corridor"]);
+    expect(at(9.5, 1.5, 5)).toEqual(["corridor"]);
+    expect(at(9, 1.5, 12)).toEqual(["hall"]);
+    expect(at(20, 1.5, 12)).toEqual(["hall"]);
+    expect(at(28, 1.5, 10)).toEqual(["small"]);
+    expect(at(33.5, 1.5, 10)).toEqual(["small"]);
+  });
+
+  test("every dynamic light has bounds, and sits inside them with 0.3 m to spare", () => {
+    const dynamic = data.lights.filter((l) => l.flicker !== "none");
+    expect(dynamic.length).toBeGreaterThanOrEqual(4);
+    for (const l of dynamic) {
+      expect(l.bounds).toBeDefined();
+      const b = boxOf(l.bounds!);
+      const p = l.position;
+      const margin = Math.min(
+        p.x - b.x0,
+        b.x1 - p.x,
+        p.y - b.y0,
+        b.y1 - p.y,
+        p.z - b.z0,
+        b.z1 - p.z,
+      );
+      expect(margin).toBeGreaterThanOrEqual(0.3);
+    }
+  });
+
+  test("no corridor light's bounds reach under the floor over the pit", () => {
+    const corridor = data.lights.filter(
+      (l) => l.bounds && l.position.x < 11.1 && l.position.z < 8,
+    );
+    expect(corridor.length).toBe(2);
+    for (const l of corridor) {
+      const b = boxOf(l.bounds!);
+      const overPit =
+        b.x0 < PIT.x1 && b.x1 > PIT.x0 && b.z0 < PIT.z1 && b.z1 > PIT.z0;
+      if (overPit) expect(b.y0).toBeGreaterThanOrEqual(-0.05);
+    }
+  });
+
+  test("a light's bounds end inside the walls of its room (no light in a neighbour room)", () => {
+    // Points in the middle of each room: a bounded light reaches only its own.
+    const rooms: [string, number, number, number][] = [
+      ["lab", 0, 1.5, 0],
+      ["storage", 9, 2, 12],
+      ["hall", 19, 2, 12.5],
+      ["chamber", 28.5, 2, 9.8],
+      ["lock", 33.5, 1.5, 9.8],
+    ];
+    for (const l of data.lights) {
+      if (!l.bounds) continue;
+      const b = boxOf(l.bounds);
+      const inside = rooms.filter(([, x, y, z]) => containsPoint(b, x, y, z));
+      expect(inside.length).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe("second puzzle space", () => {
+  const buttonById = (id: string) => data.buttons.find((b) => b.id === id)!;
+  const doorById = (id: string) => data.doors.find((d) => d.id === id)!;
+  const timed = buttonById(HALL.timedButton);
+  const inner = buttonById(HALL.innerButton);
+  const target = buttonById(HALL.impactButton);
+  const doorT = doorById(HALL.timedDoor);
+  const exitDoor = doorById(HALL.exitDoor);
+  const doorBox = (id: string) => boxOf(doorById(id).closed);
+
+  test("button modes and targets", () => {
+    expect(timed.mode).toBe("timed");
+    expect(timed.seconds).toBe(HALL.seconds);
+    expect(timed.target).toBe(doorT.id);
+    expect(inner.mode).toBe("timed");
+    expect(inner.target).toBe(doorT.id);
+    expect(target.mode).toBe("impact");
+    expect(target.target).toBe(exitDoor.id);
+    // No other button works door T or the exit door.
+    for (const b of data.buttons) {
+      if (b.target === doorT.id) expect([timed.id, inner.id]).toContain(b.id);
+      if (b.target === exitDoor.id) expect(b.id).toBe(target.id);
+    }
+    // The timed doorway is wide enough to pass a crate left in it.
+    const t = boxOf(doorT.closed);
+    expect(t.z1 - t.z0).toBeGreaterThanOrEqual(1.8);
+  });
+
+  test("timed door: close as the crow flies, but a sprint round the screen arrives as the gap closes", () => {
+    const d = HALL.timedDoorway;
+    const straight = Math.hypot(timed.position.x - d.x, timed.position.z - d.z);
+    expect(straight).toBeLessThan(3.5);
+    // The sprint route is walkable: a player box swept along every leg
+    // touches no brush.
+    const route = HALL.sprintRoute;
+    let length = 0;
+    for (let i = 0; i + 1 < route.length; i++) {
+      const p = route[i];
+      const q = route[i + 1];
+      const leg = Math.hypot(q.x - p.x, q.z - p.z);
+      length += leg;
+      for (let t = 0; t <= 1; t += 0.02) {
+        const x = p.x + (q.x - p.x) * t;
+        const z = p.z + (q.z - p.z) * t;
+        const body: Box = {
+          x0: x - PLAYER.halfWidth,
+          x1: x + PLAYER.halfWidth,
+          y0: PLAYER.stepHeight + 0.01,
+          y1: PLAYER.standHeight,
+          z0: z - PLAYER.halfWidth,
+          z1: z + PLAYER.halfWidth,
+        };
+        expect(brushIndex.overlapping(body)).toEqual([]);
+      }
+    }
+    // The press spot is within reach of the button.
+    const eye = v3.create(
+      HALL.pressSpot.x,
+      HALL.pressSpot.y + PLAYER.eyeHeight,
+      HALL.pressSpot.z,
+    );
+    expect(v3.distance(eye, timed.position)).toBeLessThan(PLAYER.reach - 0.5);
+    // How long the closing slab takes to narrow the doorway below the
+    // player's width (it starts DOOR_OVERTRAVEL inside the wall).
+    const t = boxOf(doorT.closed);
+    const width = t.z1 - t.z0;
+    const travel = width + 0.05 - 2 * PLAYER.halfWidth;
+    const accelTime = DOOR_SPEED / DOOR_ACCEL;
+    const accelDist = (DOOR_SPEED * accelTime) / 2;
+    const closing = accelTime + (travel - accelDist) / DOOR_SPEED;
+    const sprint = length / RUN_SPEED;
+    // A sprint is slower than the countdown...
+    expect(sprint).toBeGreaterThan(HALL.seconds + 0.5);
+    // ...and only a perfect line squeezes through the closing gap: the
+    // ideal run arrives within a quarter second of the deadline.
+    expect(Math.abs(sprint - (HALL.seconds + closing))).toBeLessThan(0.25);
+    console.log(
+      `timed door: straight ${straight.toFixed(2)} m, route ${length.toFixed(2)} m, sprint ${sprint.toFixed(2)} s, countdown ${HALL.seconds} s + closing ${closing.toFixed(2)} s`,
+    );
+  });
+
+  test("the screen: no way through but round its end; the timed button is out of reach from the lane", () => {
+    const screen = boxOf(HALL.screen);
+    const lane = boxOf(HALL.lane);
+    // Block the lane's entrance: the lane becomes unreachable.
+    const gate: Box = {
+      x0: lane.x0,
+      x1: screen.x0,
+      y0: 0,
+      y1: 3,
+      z0: screen.z0,
+      z1: screen.z1,
+    };
+    const shut = walkFlood(PLAYER.halfWidth, PLAYER.standHeight, [gate]);
+    expect(reaches(shut, 23.8, 13)).toBe(true);
+    expect(reaches(shut, 24.6, 9.9)).toBe(false);
+    expect(reaches(WALK, 24.6, 9.9)).toBe(true);
+    // The slot passes any crate (so every hall prop can wedge the door)
+    // but not a crouching player, and the screen reaches the ceiling
+    // (nothing to climb over).
+    const slot = HALL.slot.top - HALL.slot.bottom;
+    expect(slot).toBeGreaterThan(
+      2 * PROP_SPECS.crate_wood.halfExtents.y + 0.05,
+    );
+    expect(slot).toBeGreaterThan(
+      2 * PROP_SPECS.crate_wood_small.halfExtents.y + 0.3,
+    );
+    expect(slot).toBeLessThan(PLAYER.crouchHeight - 0.05);
+    // Standing on the lower rail, a player does not fit under the upper one.
+    expect(HALL.slot.top - HALL.slot.bottom).toBeLessThan(PLAYER.crouchHeight);
+    expect(screen.y1).toBeCloseTo(boxOf(HALL.hall).y1, 6);
+    // From anywhere in the lane the timed button is beyond reach, even
+    // with a jump.
+    let nearest = Infinity;
+    for (const [x, z] of cellsOf(WALK)) {
+      if (!containsPoint(lane, x, 1, z)) continue;
+      for (const y of [
+        PLAYER.eyeHeight,
+        PLAYER.eyeHeight + PLAYER.jumpHeight,
+      ]) {
+        nearest = Math.min(
+          nearest,
+          v3.distance(v3.create(x, y, z), timed.position),
+        );
+      }
+    }
+    expect(nearest).toBeGreaterThan(PLAYER.reach + 0.1);
+  });
+
+  test("a small crate at the wedge spot is in the slab's path and leaves the doorway passable", () => {
+    const w = HALL.wedgeSpot;
+    const h = PROP_SPECS.crate_wood_small.halfExtents;
+    const crate: Box = {
+      x0: w.x - h.x,
+      x1: w.x + h.x,
+      y0: w.y - h.y,
+      y1: w.y + h.y,
+      z0: w.z - h.z,
+      z1: w.z + h.z,
+    };
+    expect(crate.y0).toBeCloseTo(0, 6);
+    expect(brushIndex.overlapping(crate)).toEqual([]);
+    const slab = boxOf(doorT.closed);
+    expect(boxesOverlap(crate, slab, 0.05)).toBe(true);
+    // Pushed against the far jamb by the closing slab, it leaves the rest
+    // of the doorway free for the player.
+    const free = slab.z1 - slab.z0 - 2 * h.z;
+    expect(free).toBeGreaterThan(2 * PLAYER.halfWidth + 0.6);
+    // The same holds for a big crate.
+    expect(
+      slab.z1 - slab.z0 - 2 * PROP_SPECS.crate_wood.halfExtents.z,
+    ).toBeGreaterThan(2 * PLAYER.halfWidth + 0.3);
+  });
+
+  test("the impact target is out of reach of the use key from anywhere one can stand", () => {
+    let nearest = Infinity;
+    for (const [x, z] of cellsOf(WALK)) {
+      nearest = Math.min(
+        nearest,
+        v3.distance(v3.create(x, PLAYER.eyeHeight, z), target.position),
+      );
+    }
+    expect(nearest).toBeGreaterThan(PLAYER.reach + 0.1);
+  });
+
+  test("the impact target can be hit by a throw from many places in the chamber", () => {
+    // Light props leave the hand at 11 m/s along the view plus 1 m/s up
+    // (src/player/tuning.ts), from about the eye; props fall at 9.81 m/s2.
+    const speed = 11;
+    const up = 1;
+    const g = 9.81;
+    const chamber = boxOf(HALL.chamber);
+    const f = target.facing;
+    const p = target.position;
+    let good = 0;
+    for (const [x, z] of cellsOf(WALK)) {
+      if (!containsPoint(chamber, x, 1, z)) continue;
+      const o = v3.create(x, PLAYER.eyeHeight, z);
+      const dx = p.x - o.x;
+      const dz = p.z - o.z;
+      const flat = Math.hypot(dx, dz);
+      const dh = p.y - o.y;
+      // Lowest pitch whose arc passes the target's height at its distance.
+      let hit = false;
+      for (let deg = -10; deg <= 70 && !hit; deg += 0.5) {
+        const a = (deg * Math.PI) / 180;
+        const vx = speed * Math.cos(a);
+        const vy = speed * Math.sin(a) + up;
+        const t = flat / vx;
+        const y = vy * t - (g * t * t) / 2;
+        if (Math.abs(y - dh) > 0.1) continue;
+        // Approaching the face (not already falling past it from above at
+        // a grazing angle), and the arc is clear of brushes.
+        const vyAt = vy - g * t;
+        const into = (vx * (dx * -f.x + dz * -f.z)) / flat;
+        if (into < 4 || vyAt < -6) continue;
+        let clear = true;
+        for (let k = 1; k < 40 && clear; k++) {
+          const s = (t * k) / 40;
+          const px = o.x + (dx / flat) * vx * s;
+          const pz = o.z + (dz / flat) * vx * s;
+          const py = o.y + vy * s - (g * s * s) / 2;
+          const r = 0.2;
+          clear =
+            brushIndex.overlapping({
+              x0: px - r,
+              x1: px + r,
+              y0: py - r,
+              y1: py + r,
+              z0: pz - r,
+              z1: pz + r,
+            }).length === 0;
+        }
+        hit = clear;
+      }
+      if (hit) good++;
+    }
+    expect(good).toBeGreaterThan(20);
+  });
+
+  test("throwables in the chamber, and nowhere up high for them to stay", () => {
+    const chamber = boxOf(HALL.chamber);
+    const throwables = data.props.filter(
+      (p) =>
+        containsPoint(chamber, p.position.x, p.position.y, p.position.z) &&
+        PROP_SPECS[p.kind].mass <= PLAYER.maxCarryMass &&
+        PROP_SPECS[p.kind].mass * 4 >= 25,
+    );
+    expect(throwables.length).toBeGreaterThanOrEqual(3);
+    expect(
+      throwables.filter((p) => p.kind === "crate_wood_small").length,
+    ).toBeGreaterThanOrEqual(2);
+    // No ledge in the chamber above jump-and-reach height wide enough for a
+    // small crate to come to rest on.
+    for (const b of brushes) {
+      if (!boxesOverlap(b, chamber)) continue;
+      if (b.y1 <= 1.3 || b.y1 >= chamber.y1 - 1e-6) continue;
+      const wide = Math.min(
+        Math.min(b.x1, chamber.x1) - Math.max(b.x0, chamber.x0),
+        Math.min(b.z1, chamber.z1) - Math.max(b.z0, chamber.z0),
+      );
+      expect([b, wide < 0.3]).toEqual([b, true]);
+    }
+  });
+
+  test("the exit box: in the lock, generous, reachable only through every door", () => {
+    const e = boxOf(data.exit);
+    expect(e.x1 - e.x0).toBeGreaterThanOrEqual(1.5);
+    expect(e.z1 - e.z0).toBeGreaterThanOrEqual(1.5);
+    expect(e.y0).toBeLessThanOrEqual(0);
+    expect(e.y1).toBeGreaterThanOrEqual(2.5);
+    const lock = boxOf(HALL.lock);
+    expect(e.x0).toBeGreaterThanOrEqual(lock.x0 + 0.9);
+    // Clear floor space (wall signs and the lamp may stand in its edges).
+    const body: Box = {
+      x0: e.x0 + 0.05,
+      x1: e.x1 - 0.05,
+      y0: 0.01,
+      y1: PLAYER.standHeight,
+      z0: e.z0 + 0.05,
+      z1: e.z1 - 0.05,
+    };
+    expect(brushIndex.overlapping(body)).toEqual([]);
+    const reachesExit = (set: Set<string>) =>
+      cellsOf(set).some(([x, z]) => containsPoint(e, x, 0, z));
+    expect(reachesExit(WALK)).toBe(true);
+    const slabs = data.doors.map((d) => boxOf(d.closed));
+    expect(
+      reachesExit(walkFlood(PLAYER.halfWidth, PLAYER.standHeight, slabs)),
+    ).toBe(false);
+    for (const door of data.doors) {
+      const one = walkFlood(PLAYER.halfWidth, PLAYER.standHeight, [
+        doorBox(door.id),
+      ]);
+      expect([door.id, reachesExit(one)]).toEqual([door.id, false]);
+    }
   });
 });

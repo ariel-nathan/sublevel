@@ -5,7 +5,7 @@
  * Uses the renderer's "coverage" debug view (geometry white on pure magenta)
  * and counts magenta pixels: every one is a missing face. Checks three fixed
  * reference cameras, then a sweep of positions in every room at crouch, eye
- * and jump height looking in eight directions and up/down, with both doors
+ * and jump height looking in eight directions and up/down, with every door
  * closed and then open. Images with holes are written to `outDir`.
  *
  * The coverage view keeps the renderer's alpha test, so the view continues
@@ -14,6 +14,7 @@
  * the spots on and around it.
  */
 import { launchGame } from "../../tools/browser";
+import { OPEN_FAR_DOORS_SCRIPT } from "../../tools/views";
 
 type V = [number, number, number];
 const outDir = process.argv[2] ?? "out/coverage";
@@ -53,14 +54,33 @@ const spots: [number, number, number][] = [
   [10, 14, 0],
   [12.5, 10.3, 0],
   [13.65, 12, 0],
-  [14.5, 12, 0],
-  [15.3, 11.5, 0],
+  [14.6, 12, 0],
+  [14.85, 10.3, 0],
+  [17, 9.4, 0],
+  [21, 10, 0],
+  [24.6, 9.6, 0],
+  [24.8, 10.6, 0],
+  [17, 12.5, 0],
+  [20.5, 13.6, 0],
+  [23.8, 13, 0],
+  [24.5, 11.4, 0],
+  [16, 13.6, 0],
+  [25.25, 9.9, 0],
+  [26.5, 8, 0],
+  [28.5, 9.8, 0],
+  [30.9, 9.8, 0],
+  [29, 11.8, 0],
+  [31.55, 9.8, 0],
+  [32.4, 9.8, 0],
+  [34.2, 8.8, 0],
+  [34.2, 10.8, 0],
   [7, 15, 1.4],
   [6, 14.2, 1.4],
 ];
 const heights = [0.6, 1.6, 2.2];
 /** Doorway spots stay below the lintel. */
-const cap = (x: number): number => (x === 4.15 || x === 13.65 ? 2.0 : 9);
+const cap = (x: number): number =>
+  x === 4.15 || x === 13.65 || x === 25.25 || x === 31.55 ? 2.0 : 9;
 
 const session = await launchGame({ width: 1280, height: 960 });
 const results: string[] = [];
@@ -147,6 +167,8 @@ try {
       y: p.max.y + crate.halfExtents.y + 0.01, z: (p.min.z + p.max.z) / 2 });
     __harness.step(240);
   })()`);
+  // The doors beyond door B: the timed door (wedged) and the exit door.
+  await session.evaluate(OPEN_FAR_DOORS_SCRIPT);
   await sweep("open");
 } finally {
   await session.close();

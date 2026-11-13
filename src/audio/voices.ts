@@ -189,6 +189,122 @@ export function distanceSend(distance: number, a: Attenuation): number {
   return Math.sqrt(distanceGain(distance, a));
 }
 
+// --- Occlusion --------------------------------------------------------------
+
+/**
+ * What full occlusion (1) does to a sound: the direct sound is low-passed
+ * down to `minCutoff` and turned down by `maxAttenuationDb`, while the
+ * reverb send drops only `sendDropDb`, so a sound heard through walls or
+ * from the next room is dull and mostly reverberant (its wet/dry ratio rises
+ * by 9 dB).
+ */
+export const OCCLUSION = {
+  maxCutoff: 20000,
+  minCutoff: 800,
+  /**
+   * Cutoff falls log-linearly in occlusion^curve: below 1 the first bit of
+   * occlusion already dulls clearly (0.25 -> 5.4 kHz, 0.5 -> 2.2 kHz).
+   */
+  curve: 0.75,
+  maxAttenuationDb: 14,
+  sendDropDb: 5,
+  /** Glide time (s) for occlusion changes on loops by default. */
+  smoothing: 0.12,
+} as const;
+
+export interface OcclusionParams {
+  /** Low-pass cutoff of the direct sound, Hz. */
+  cutoff: number;
+  /** Gain of the direct sound. */
+  gain: number;
+  /** Factor on the reverb send. */
+  send: number;
+}
+
+/** Clamps occlusion to 0..1 (NaN and undefined count as 0). */
+export function clampOcclusion(o: number | undefined): number {
+  if (o === undefined || !(o > 0)) return 0;
+  return Math.min(1, o);
+}
+
+/**
+ * Filter and levels for an occlusion of 0 (clear) to 1 (behind walls).
+ * Monotonic: more occlusion is always duller and quieter, never brighter.
+ */
+export function occlusionParams(
+  occlusion: number | undefined,
+): OcclusionParams {
+  const o = clampOcclusion(occlusion);
+  const c = OCCLUSION;
+  return {
+    cutoff: c.maxCutoff * (c.minCutoff / c.maxCutoff) ** (o ** c.curve),
+    gain: 10 ** ((-c.maxAttenuationDb * o) / 20),
+    send: 10 ** ((-c.sendDropDb * o) / 20),
+  };
+}
+
+/**
+ * What a ray from the listener towards a source hit first, if anything
+ * nearer than `maxDistance`: its distance, or null if nothing blocks it.
+ * The game supplies it from `physics.raycast`, counting statics and
+ * kinematics (walls, doors) but not dynamic bodies (props do not occlude).
+ */
+export type OcclusionRaycast = (
+  origin: Vec3Like,
+  direction: Vec3Like,
+  maxDistance: number,
+) => number | null;
+
+export interface Vec3Like {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Occlusion between `listener` and `source`, 0..1: casts four rays from the
+ * listener (to the source, to points 0.6 m either side of it horizontally
+ * and 0.6 m above it); a ray is blocked if it hits something more than
+ * 0.25 m short of its target. The direct ray weighs half, the others a
+ * sixth each, minus a small dead zone (see below). One wall in the way
+ * gives 1; a sound around a door frame or a corner gives a partial value,
+ * so it fades as the listener moves rather than switching. Pure (the
+ * raycast is injected).
+ */
+export function measureOcclusion(
+  listener: Vec3Like,
+  source: Vec3Like,
+  raycast: OcclusionRaycast,
+): number {
+  const dx = source.x - listener.x;
+  const dz = source.z - listener.z;
+  const flat = Math.hypot(dx, dz);
+  // Horizontal unit vector at right angles to the line of sight.
+  const sx = flat > 1e-6 ? -dz / flat : 1;
+  const sz = flat > 1e-6 ? dx / flat : 0;
+  const targets: Vec3Like[] = [
+    source,
+    { x: source.x + 0.6 * sx, y: source.y, z: source.z + 0.6 * sz },
+    { x: source.x - 0.6 * sx, y: source.y, z: source.z - 0.6 * sz },
+    { x: source.x, y: source.y + 0.6, z: source.z },
+  ];
+  let score = 0;
+  targets.forEach((t, i) => {
+    const v = { x: t.x - listener.x, y: t.y - listener.y, z: t.z - listener.z };
+    const d = Math.hypot(v.x, v.y, v.z);
+    if (d < 0.3) return;
+    const dir = { x: v.x / d, y: v.y / d, z: v.z / d };
+    const hit = raycast(listener, dir, d);
+    // The direct ray counts half; the three offset rays share the rest.
+    if (hit !== null && hit < d - 0.25) score += i === 0 ? 0.5 : 0.5 / 3;
+  });
+  // A dead zone, so one grazing offset ray (a crate against a wall in full
+  // view) does not dull anything: one offset ray alone -> 0, the direct ray
+  // alone (a pillar) -> 0.38, direct plus one offset -> 0.58, all -> 1.
+  const o = Math.round(((score - 0.2) / 0.8) * 1e6) / 1e6;
+  return Math.min(1, Math.max(0, o));
+}
+
 // --- Room -------------------------------------------------------------------
 
 export interface RoomResponse {

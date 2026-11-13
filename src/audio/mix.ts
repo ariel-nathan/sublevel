@@ -40,6 +40,8 @@ export type Category =
   | "button"
   | "door"
   | "plate"
+  | "cue"
+  | "contact"
   | "ambience";
 
 export const CATEGORY_OF: Readonly<Record<SoundId, Category>> = {
@@ -63,6 +65,13 @@ export const CATEGORY_OF: Readonly<Record<SoundId, Category>> = {
   hum_fluorescent: "ambience",
   hum_machine: "ambience",
   ambient_drone: "ambience",
+  timer_tick: "button",
+  door_blocked: "door",
+  objective: "cue",
+  scrape_wood: "contact",
+  scrape_metal: "contact",
+  scrape_plastic: "contact",
+  roll_metal: "contact",
 };
 
 export interface LoudnessTarget {
@@ -102,6 +111,20 @@ export const LOUDNESS: Readonly<Record<SoundId, LoudnessTarget>> = {
   hum_fluorescent: { rmsDb: -25, peakDb: -12 },
   hum_machine: { rmsDb: -23, peakDb: -10 },
   ambient_drone: { rmsDb: -26, peakDb: -12 },
+  // Round 2. The tick repeats once a second for ten seconds: soft, under a
+  // button press. The blocked door sits just under a door closing. The
+  // completion cue is a quiet signal, at handling level.
+  timer_tick: { rmsDb: -19, peakDb: -7 },
+  door_blocked: { rmsDb: -12.5, peakDb: -2 },
+  objective: { rmsDb: -17, peakDb: -6 },
+  // Contact loops (whole-loop RMS at gain 1): continuous, so they sit far
+  // under the impacts that start and end them (-10 dB), and the game's own
+  // gain (contactLoopParams, at most ~0.9) comes on top. Metal grind is
+  // brighter, so it sits a little lower; the light plastic scuff lowest.
+  scrape_wood: { rmsDb: -20, peakDb: -6 },
+  scrape_metal: { rmsDb: -21, peakDb: -6 },
+  scrape_plastic: { rmsDb: -22.5, peakDb: -8 },
+  roll_metal: { rmsDb: -20, peakDb: -5 },
 };
 
 // --- Candidate designs (listening round 1, see DESIGN.md) --------------------
@@ -255,9 +278,9 @@ export interface CompressorSettings {
 /**
  * Bus settings for the Web Audio graph (index.ts):
  *
- *   one-shots -> sfx bus -> glue compressor --+
- *   loops ------> ambience bus ---------------+-> mix -> limiter -> master
- *   sends ------> room reverb ----------------+
+ *   one-shots, contact loops -> sfx bus -> glue compressor --+
+ *   ambience loops ------> ambience bus ---------------------+-> mix -> limiter -> master
+ *   sends ------> room reverb (cross-faded per room) --------+
  *
  * Ambience bypasses the glue compressor so a burst of impacts cannot pump
  * the hum down; the limiter only catches overs.
@@ -284,9 +307,16 @@ export const BUSES = {
     attack: 0.001,
     release: 0.1,
   } satisfies CompressorSettings,
+  /** Reverb send for contact loops (scrapes, rolls), which are world sounds. */
+  contactReverbSend: 0.2,
   /** Loops fade in and out over these times (s). */
   loopFadeIn: 0.8,
   loopFadeOut: 0.08,
+  /**
+   * Contact loops follow the simulation, so they start quickly (their level
+   * is then glided by `setLoopParams`).
+   */
+  contactFadeIn: 0.03,
 } as const;
 
 /** Voice-stealing priority per category (see voices.ts PRIORITY). */
@@ -297,6 +327,8 @@ export const PRIORITY_OF: Readonly<Record<Category, number>> = {
   button: 3,
   door: 3,
   plate: 3,
+  cue: 3,
+  contact: 3,
   break: 2,
   impact: 1,
   ambience: 3,

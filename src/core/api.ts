@@ -348,6 +348,13 @@ export const SOUND_IDS = [
   "hum_fluorescent",
   "hum_machine",
   "ambient_drone",
+  "timer_tick",
+  "door_blocked",
+  "objective",
+  "scrape_wood",
+  "scrape_metal",
+  "scrape_plastic",
+  "roll_metal",
 ] as const;
 
 export type SoundId = (typeof SOUND_IDS)[number];
@@ -357,6 +364,10 @@ export const LOOPING_SOUNDS: readonly SoundId[] = [
   "hum_fluorescent",
   "hum_machine",
   "ambient_drone",
+  "scrape_wood",
+  "scrape_metal",
+  "scrape_plastic",
+  "roll_metal",
 ];
 
 export interface PlayOptions {

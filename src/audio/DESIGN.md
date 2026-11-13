@@ -295,6 +295,110 @@ to `out/audio/cand/`: one PNG and WAV per sound, an 8-step walk at the
 game's cadence (`walk_*.png`), and a contact sheet. It also prints the
 table above.
 
+## Round 2: contact loops, occlusion, rooms, new cues
+
+Everything here is **[I]** unless tagged, and is built in the idiom round 1
+accepted: shaped noise, irregular events, no clean ringing modes.
+
+### Contact loops (`contact.ts`)
+
+Four loops of 2^18 samples (5.9 s at 44.1 kHz, 5.5 s at 48 kHz). The game
+glides their gain and playback rate continuously, so each must work from a
+whisper to full level and at rates 0.6–1.6.
+
+- **Built circularly, so they are exactly seamless.** Events that run past
+  the end wrap to the start. Every filter is first run over the last 0.25 s
+  of the loop, so it reaches sample 0 in the state it would have after
+  sample n−1 (`circularFilter`). Drifts use 4–60 whole cycles per loop.
+- **Then two clean-ups.** `deswell` divides out any 1–3 cycles-per-loop
+  swell, which random event clustering leaves behind; the gain curve
+  changes over seconds. `startInLull` rotates the loop so that it starts
+  in its quietest 10 ms.
+- **Friction.** A noise bed whose level flickers (random, low-passed at
+  25–110 Hz), plus stick-slip chatter: Poisson bursts whose rate drifts.
+  Each burst is a short noise grain band-passed at its own random centre.
+  Played faster, the chatter gets denser and brighter but never turns into
+  a buzz, because nothing in it is regular.
+
+| loop           | design                                                                                                                                                                                                                | centroid | tonal @0.6/1/1.6 (dB) | envelope spread | render (48 kHz) |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | --------------------- | --------------- | --------------- |
+| scrape_wood    | 0.26–3.2 kHz bed flickering to 35 Hz; ~45 slips/s at 0.35–1.6 kHz; ~7 heavier catches/s at 170–420 Hz (the crate body); fine grit grains at 1.8–5 kHz; low-passed at 6.5 kHz                                          | 1.4 kHz  | 1.5 / 1.5 / 1.8       | 4.4 dB          | ~65 ms          |
+| scrape_metal   | 0.65–8 kHz grinding bed flickering to 110 Hz; ~90 bright slips/s at 1.1–5 kHz; a low thrum; a squeal (Q 14 band plus one at 1.47×, centre wandering ±0.45 octave around ~2 kHz, in only 5 swells per loop, low level) | 3.3 kHz  | 2.5 / 2.2 / 3.2       | 4.7 dB          | ~50 ms          |
+| scrape_plastic | Quieter 0.4–4.5 kHz bed; ~28 softer scuffs/s; two broad shell resonances (650 Hz, 1.5 kHz, +5/+6 dB); brief skips where the level dips by ~10 dB for 40–120 ms                                                        | 1.6 kHz  | 3.2 / 3.1 / 3.2       | 6.9 dB          | ~30 ms          |
+| roll_metal     | 35–300 Hz rumble that undulates; a quiet rolling band around 600 Hz; ~2.5 soft knocks/s, never closer than 0.12 s apart, each a 5 ms-attack thud with a faint crowd of 24 damped partials drawn afresh                | 0.2 kHz  | 5.3 / 1.3 / 1.6       | 9.0 dB          | ~35 ms          |
+
+- **Levels** (whole-loop RMS at gain 1): wood −20, metal −21, plastic
+  −22.5, roll −20 dBFS. That is 10 dB or more under the impacts that start
+  and end a push. The game's gain from `contactLoopParams` (at most about
+  0.95) comes on top.
+- **Mapping** (`contactLoopParams` in `contactVoices.ts`):
+  - Level = (1 − e^(−(v − 0.08)/0.35)) × (0.25 + p), where
+    p = F / (F + 250 N). The loop is silent at or below 0.08 m/s; the level
+    is 29 % at 0.2 m/s and 70 % at 0.5 m/s.
+  - Pitch = 0.8 + 0.45 × (rise with speed), × (1.12 − 0.25 p), so heavier
+    sounds slightly lower. Rolls rise more slowly and their pitch range is
+    wider.
+- **Voices** (`createContactVoicePool`):
+  - 4 voices. Only a contact whose target gain is at least 0.03 can claim
+    a voice.
+  - A voice keeps its body until that body stops. Another contact can take
+    it only if it is at least 2× louder and the voice has played for at
+    least 0.3 s. The voice then fades out over 40 ms before it is handed
+    over.
+  - Gain is smoothed with 30 ms attack and 120 ms release, pitch over
+    80 ms.
+  - Scrape and roll switch only after the other kind has been 1.5× louder
+    for 120 ms. The switch cross-fades between the voice's two loops.
+  - A voice is free again once its gain falls below 0.002, after one final
+    zero.
+  - Each body gets a fixed ±3 % detune.
+- **Silence costs nothing.** A loop at gain 0 fades out, stops and releases
+  every node; the next non-zero gain starts it again at a new offset.
+  Loops never use voice-limiter slots.
+
+### Occlusion (`voices.ts`)
+
+`occlusionParams(o)`:
+
+- Direct sound: low-passed from 20 kHz down to 800 Hz
+  (cutoff = 20000 · (800/20000)^(o^0.75)), and turned down by up to
+  −14 dB.
+- Reverb send: drops only 5 dB, so the wet/dry ratio rises by 9 dB at
+  full occlusion.
+- Graph: the send is tapped before the occlusion stage, and changes glide
+  smoothly.
+
+`measureOcclusion` casts four rays: the direct ray (weighted ½) and three
+rays 0.6 m beside and above the source (⅙ each). A dead zone of 0.2 is
+removed, so one grazing ray does nothing.
+
+### Rooms (`rooms.ts`)
+
+Four procedural impulse responses, generated once per rate and cached. All
+four take about 25–45 ms to generate. They are scaled from the EAX-era
+presets **[S10]**: room 0.4 s, hallway 1.5 s. Measured T20 at 44.1 kHz:
+
+| room     | RT60 low/mid/high (s) | pre-delay | measured T20 | character                                                                | wet |
+| -------- | --------------------- | --------- | ------------ | ------------------------------------------------------------------------ | --- |
+| small    | 0.32 / 0.28 / 0.22    | 2 ms      | 0.26 s       | dense reflections within 14 ms, bright                                   | 0.5 |
+| lab      | 0.62 / 0.55 / 0.40    | 5 ms      | 0.52 s       | slightly bright                                                          | 0.7 |
+| corridor | 1.3 / 1.1 / 0.5       | 8 ms      | 1.07 s       | darker; flutter echo every 13.5 ms (walls ~2.3 m apart) dying in ~0.25 s | 0.9 |
+| hall     | 2.3 / 1.8 / 0.8       | 20 ms     | 2.1 s        | slow 70 ms build-up, low-mid heavy, dull reflections                     | 1.0 |
+
+- A room change cross-fades two convolvers over 0.4 s.
+- "corridor" is the default outside every zone; it replaces the single
+  0.85 s room.
+- `roomAt` adds 0.4 m of hysteresis at zone boundaries, so standing in a
+  doorway does not flip the reverb.
+
+### New one-shots (`cues.ts`)
+
+| sound        | design                                                                                                                                                                                                            | dur    | rms50 / K (dBFS) | tonal           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------------- | --------------- |
+| timer_tick   | Relay tick: noise click (0.6 ms rounded attack, 2.9 kHz band), a soft 900 Hz "tock", a faint bounce 7 ms later and a trace of low weight; at pitch 1.2 shorter and brighter                                       | 0.05 s | −19 / −16.3      | 6 dB            |
+| door_blocked | Motor running, then at 0.1 s a dull rounded knock (noise thud and 50 damped partials). The motor sags and buzzes roughly (46 Hz) with a gritty groan; at 0.56 s a brake click, a brief spin-up and an air release | 1.15 s | −12.5 / −13      | 7 dB            |
+| objective    | Soft speaker-band noise swell under C5, G5 and then an E5+B5 chord. The tones are rounded (12 ms attack, harmonics fading fast) through a 250 Hz–4 kHz band. An original major-seventh outline                    | 1.6 s  | −17 / −16.7      | tonal by design |
+
 ## Sources
 
 1. Valve Developer Community, "WAV" — https://developer.valvesoftware.com/wiki/WAV

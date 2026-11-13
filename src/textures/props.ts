@@ -73,22 +73,34 @@ export const crateWood = (c: Canvas, g: GenContext): void => {
   c.grain(rng, 0.03);
 };
 
-function crackLine(
+/**
+ * A continuous grain-following split: one dark pixel per step, a pale lip on
+ * its lit side, a one-pixel jog every nine pixels and a thinning tail, so it
+ * reads as one crack instead of a run of dashes.
+ */
+function split(
   c: Canvas,
-  g: GenContext,
   x: number,
   y: number,
-  steps: number,
-  angle: number,
-  jag: number,
+  len: number,
+  vertical: boolean,
 ): void {
-  let ang = angle;
-  for (let i = 0; i < steps; i++) {
-    c.set(x, y, hex(0x2a1a10));
-    c.blend(x, y - 1, hex(0xe8d6ae), 0.55);
-    ang = angle + g.rng.range(-jag, jag);
-    x += Math.cos(ang);
-    y += Math.sin(ang);
+  let off = 0;
+  for (let i = 0; i < len; i++) {
+    if (i > 0 && i % 9 === 0) off += i % 18 === 0 ? -1 : 1;
+    const a = vertical ? x + off : x + i;
+    const b = vertical ? y + i : y + off;
+    const tail = i >= len - 4;
+    if (tail) c.blend(a, b, hex(0x2a1a10), 0.55);
+    else c.set(a, b, hex(0x2a1a10));
+    if (vertical) c.blend(a - 1, b, hex(0xe8d6ae), 0.6);
+    else c.blend(a, b - 1, hex(0xe8d6ae), 0.6);
+    if (i === 0 || i === len - 1) continue;
+    // jog: join the two steps so the line never breaks
+    if (i % 9 === 0) {
+      if (vertical) c.set(a + (i % 18 === 0 ? 1 : -1), b, hex(0x2a1a10));
+      else c.set(a, b + (i % 18 === 0 ? 1 : -1), hex(0x2a1a10));
+    }
   }
 }
 
@@ -153,10 +165,10 @@ export const crateWoodWeak = (c: Canvas, g: GenContext): void => {
     if (y % 2 === 0) c.blend(ex - 2, y, hex(0x4a3420), 0.7);
   }
   // splits along the grain
-  crackLine(c, g, 11, 15, 22, 0.05, 0.12);
-  crackLine(c, g, 36, 47, 18, -0.05, 0.12);
-  crackLine(c, g, 3, 14, 20, Math.PI / 2, 0.1);
-  crackLine(c, g, 60, 12, 12, Math.PI / 2, 0.1);
+  split(c, 9, 12, 26, false);
+  split(c, 24, 46, 24, false);
+  split(c, 3, 12, 22, true);
+  split(c, 60, 14, 16, true);
   // splintered bottom-right corner
   for (let j = 0; j < 6; j++) {
     for (let i = 0; i < 6 - j; i++) {

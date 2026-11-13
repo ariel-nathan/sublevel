@@ -18,7 +18,7 @@ interface Recipe {
 const RECIPES: Record<MaterialId, Recipe> = {
   concrete_wall: {
     size: 128,
-    colors: 20,
+    colors: 22,
     base: 0x8a867e,
     generate: arch.concreteWall,
   },

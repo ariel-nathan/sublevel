@@ -10,14 +10,14 @@ export const GRID = 0.5;
 
 /** Size in metres of one texture repeat, per material. */
 export const TILE_SIZE: Readonly<Record<MaterialId, number>> = {
-  concrete_wall: 2,
+  concrete_wall: 3,
   concrete_floor: 2,
-  ceiling_panel: 2,
+  ceiling_panel: 1.2,
   lab_wall: 3,
-  lab_floor_tile: 2,
+  lab_floor_tile: 1.6,
   metal_panel: 2,
   metal_grate: 1,
-  hazard_stripe: 1,
+  hazard_stripe: 0.75,
   door_steel: 2,
   crate_wood: 1,
   crate_wood_weak: 1,

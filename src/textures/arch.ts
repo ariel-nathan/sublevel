@@ -39,52 +39,69 @@ function crack(
   }
 }
 
+/**
+ * 128 px = 3 m (43 px per metre): four 0.75 m form boards with staggered board
+ * ends, ties on a 1.5 m grid. Stains are layered at several scales so no single
+ * blotch is recognisable when the tile repeats along a corridor.
+ */
 export const concreteWall = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
-  tone(c, g, 4, 4, 0.84, 1.16);
+  const BOARD = 32;
+  const boards = n / BOARD;
+  tone(c, g, 3, 3, 0.84, 1.16);
+  tone(c, g, 8, 8, 0.96, 1.04, 5);
   // form boards: each board slightly different, dark seam, light lip below
-  const boardTone = [1, 0.96, 1.04, 0.98];
+  const boardTone: number[] = [];
+  for (let b = 0; b < boards; b++) boardTone.push(1 + rng.range(-0.05, 0.05));
   c.each((x, y, col) => {
-    const b = Math.floor(y / 32);
+    const b = Math.floor(y / BOARD);
     const grain = 0.97 + 0.06 * g.noise.fbm(x / n, y / n, 2, 64, 2, 9);
     return scale(col, boardTone[b] * grain);
   });
-  for (let b = 0; b < 4; b++) {
+  for (let b = 0; b < boards; b++) {
     for (let x = 0; x < n; x++) {
-      c.shade(x, b * 32, 0.7);
-      c.shade(x, b * 32 + 31, 0.74);
-      c.shade(x, b * 32 + 1, 1.1);
+      c.shade(x, b * BOARD, 0.7);
+      c.shade(x, b * BOARD + BOARD - 1, 0.74);
+      c.shade(x, b * BOARD + 1, 1.1);
     }
   }
-  // form-tie holes
-  for (const [hx, hy] of [
-    [32, 16],
-    [96, 16],
-    [32, 80],
-    [96, 80],
-  ]) {
-    c.disc(hx + 0.5, hy + 0.5, 2.6, hex(0x3b3a37));
-    c.disc(hx + 0.5, hy + 0.5, 1.4, hex(0x242321));
-    c.set(hx + 2, hy + 2, hex(0xb4b0a6));
-    c.set(hx + 1, hy + 3, hex(0xa6a298));
-    c.blend(hx - 3, hy - 3, hex(0x6a6862), 0.7);
+  // vertical board ends, staggered between rows (short dark joints)
+  for (let b = 0; b < boards; b++) {
+    const jx = (rng.int(0, 1) * 64 + 20 + b * 37) % n;
+    for (let y = b * BOARD + 1; y < b * BOARD + BOARD - 1; y++) {
+      c.shade(jx, y, 0.78);
+      c.shade(jx + 1, y, 1.06);
+    }
   }
-  // water stains and grime
-  c.grime(g.noise, 10, 2, 21, 0.52, 1.2, hex(0x5f5a50));
-  c.grime(g.noise, 5, 3, 31, 0.6, 1.0, hex(0x6d6150));
+  // form-tie holes on a 1 m grid, rows shifted slightly
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 2; col++) {
+      const hx = 32 + col * 64;
+      const hy = 16 + row * 64 + col * 8;
+      c.disc(hx + 0.5, hy + 0.5, 2.6, hex(0x3b3a37));
+      c.disc(hx + 0.5, hy + 0.5, 1.4, hex(0x242321));
+      c.set(hx + 2, hy + 2, hex(0xb4b0a6));
+      c.set(hx + 1, hy + 3, hex(0xa6a298));
+      c.blend(hx - 3, hy - 3, hex(0x6a6862), 0.7);
+    }
+  }
+  // water stains and grime, at several scales so no single blotch dominates
+  c.grime(g.noise, 10, 2, 21, 0.54, 1.1, hex(0x5f5a50));
+  c.grime(g.noise, 5, 3, 31, 0.6, 0.9, hex(0x6d6150));
+  c.grime(g.noise, 3, 2, 41, 0.62, 0.5, hex(0x575248));
   // chips
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 7; i++) {
     const x = rng.int(4, n - 6);
     const y = rng.int(4, n - 6);
     const w = rng.int(2, 4);
     const h = rng.int(2, 3);
     for (let j = 0; j < h; j++) {
-      for (let k = 0; k < w; k++) c.blend(x + k, y + j, hex(0x55524b), 0.85);
+      for (let k = 0; k < w; k++) c.blend(x + k, y + j, hex(0x55524b), 0.7);
     }
-    for (let k = 0; k < w; k++) c.blend(x + k, y + h, hex(0xc4c0b6), 0.8);
+    for (let k = 0; k < w; k++) c.blend(x + k, y + h, hex(0xc4c0b6), 0.6);
   }
-  c.speckle(rng, 160, hex(0x4a4741), 0.55);
+  c.speckle(rng, 170, hex(0x4a4741), 0.5);
   c.speckle(rng, 90, hex(0xc2beb2), 0.4);
   c.grain(rng, 0.035);
 };
@@ -371,7 +388,7 @@ export const doorSteel = (c: Canvas, g: GenContext): void => {
   const { rng } = g;
   c.each((x, y) => {
     const v = g.noise.fbm(x / n, y / n, 48, 2, 3, 3);
-    return scale(hex(0x6a767c), 0.88 + 0.3 * v);
+    return scale(hex(0x6a767c), 0.92 + 0.16 * v);
   });
   tone(c, g, 2, 2, 0.94, 1.05);
   // recessed panels
@@ -418,9 +435,9 @@ export const doorSteel = (c: Canvas, g: GenContext): void => {
     return mix(col, hex(0x4a4338), Math.min(0.6, k * 0.5));
   });
   c.grime(g.noise, 4, 4, 17, 0.6, 0.9, hex(0x4d5456));
-  c.scuffs(rng, 30, hex(0xc3cbcd), 0.3, 8);
-  c.scuffs(rng, 14, hex(0x252b2e), 0.3, 6);
-  c.grain(rng, 0.025);
+  c.scuffs(rng, 12, hex(0xc3cbcd), 0.25, 8);
+  c.scuffs(rng, 6, hex(0x252b2e), 0.25, 6);
+  c.grain(rng, 0.02);
 };
 
 /**

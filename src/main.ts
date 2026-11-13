@@ -87,10 +87,12 @@ async function start(): Promise<void> {
       lookDx: look.dx,
       lookDy: look.dy,
       jump: input.isDown("Space"),
+      // Ctrl only crouches in fullscreen, where the keyboard is locked. In a
+      // window the browser acts on Ctrl+W (close tab) and a page cannot stop it.
       crouch:
-        input.isDown("ControlLeft") ||
         input.isDown("KeyC") ||
-        input.isDown("ShiftLeft"),
+        input.isDown("ShiftLeft") ||
+        (input.isDown("ControlLeft") && document.fullscreenElement !== null),
       usePressed: use,
       primaryPressed: primary,
     };

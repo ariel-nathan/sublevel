@@ -14,30 +14,48 @@ same facility.
 | `plans.ts`                                                 | Plans a module once at a canonical doorway and moves the plan rigidly to candidates            |
 | `names.ts`                                                 | The facility's name                                                                            |
 | `checks.ts`                                                | Level-wide checks of a run (seal, mesh seal, z-fighting, props, lights, zones, walk, solution) |
-| `modules/`                                                 | The generator's own modules: exit lock, doorway adapter, three stand-in puzzle rooms           |
+| `modules/`                                                 | The generator's own module: the doorway adapter                                                |
 | `gen.test.ts`, `fuzz.test.ts`, `modules/contract.test.ts`  | Tests (fuzz: `SUBLEVEL_FUZZ=1`)                                                                |
 | `plan-image.ts`, `bench.ts`, `solve-seeds.ts`, `joints.ts` | Development scripts (below)                                                                    |
 
 ## How a run is made
 
 1. **Mission** (`mission.ts`, pure, seeded). The pool is read when the run is
-   generated: `config.pool()` (default: the shared registry plus the
-   stand-ins), filtered to modules with role `"middle"`, a real lock
-   (`teaches` not `"none"`), empty `requires` (each chosen room supplies its
-   own keys; requirements are not yet carried between rooms) and exactly
-   one exit. Rules:
-   1. as many distinct mechanics as the pool offers (up to the room count);
-   2. no mechanic more than `maxPerMechanic` (2) times, unless the pool has
-      too few mechanics to fill the rooms;
-   3. the first room of each mechanic is one of its easiest modules, later
-      ones no easier (teach, then test);
-   4. difficulty never drops from room to room (where 5 allows);
-   5. no module twice in a row (and preferably no mechanic twice in a row).
+   generated: `config.pool()` (default: the shared registry,
+   `rooms/registry.ts`), filtered to modules with role `"middle"`, a real
+   lock (`teaches` not `"none"`), empty `requires` (each chosen room supplies
+   its own keys; requirements are not yet carried between rooms) and
+   exactly one exit; a module whose `after` names a mechanic nothing else
+   teaches is left out. Today that is the nine parametric puzzle rooms of
+   `rooms/puzzles/` and three authored set pieces of Kestrel Annex (storage
+   room, filtration hall, valve chamber: `setPiece: true`). The lab is the
+   fixed opening and the exit lock the fixed finish. Rules, by precedence
+   (a later rule gives way to an earlier one):
+   1. no module twice in a run (unless the pool is too small, then none
+      twice in a row); one or two set pieces per run (`setPieces`, the seed
+      chooses how many and which), each once;
+   2. teach, then test: a mechanic's first room is one of its easiest
+      modules; a module's `after` mechanics (decon lock: plate and timed
+      door) are taught by earlier rooms; a `position: "first"` module (the
+      records office, the gentlest teacher) is the first room;
+   3. every mechanic the pool offers (up to the room count), none more than
+      `maxPerMechanic` (2) times unless there are too few mechanics;
+   4. no two rooms in a row with the same mechanic or the same `idea`;
+   5. a `position: "early"` module (the freight passage) in the first half;
+   6. difficulty never drops from room to room;
+   7. preferably not two modules with the same `idea` in one run (a set
+      piece and its parametric re-take: filtration hall and pump gallery,
+      valve chamber and generator hall, storage room and goods bay).
 
-   Mechanics are shuffled, rooms allotted to them, modules picked (easiest
-   first, then unused ones), and a depth-first search orders them with 3
-   and 5 as hard constraints, preferring low difficulty first. Each room's
-   parameters come from `module.random` on a seed derived from the run seed.
+   The set pieces are drawn first; then every set of eight modules from the
+   pool without the undrawn set pieces that can satisfy 1-3 is listed (a
+   few dozen of at most 165), the sets with fewest shared ideas first in a
+   seeded random order, and each is ordered by a depth-first search with 2,
+   4, 5 and 6 as hard constraints (lowest difficulty first, random among
+   equals); if none orders, again without 5 and 6, then without 4.
+   `missionProblems` checks 1-5 and 7 on every generated run, `ramps` 6 (the
+   tests: every one of 200 seeds ramps). Each room's parameters come from
+   `module.random` on a seed derived from the run seed.
 
 2. **Placement** (`layout.ts`). The chain is start, then for each room a
    _link_ and the room, then a link and the finish. A link is the registry
@@ -67,19 +85,20 @@ same facility.
 
 ## Config (`DEFAULT_CONFIG`)
 
-| Field                 | Default                      | Meaning                                     |
-| --------------------- | ---------------------------- | ------------------------------------------- |
-| `rooms`               | 8                            | puzzle rooms                                |
-| `start`, `finish`     | `LAB`, `EXIT_LOCK`           | anchors                                     |
-| `corridor`, `adapter` | `CORRIDOR`, `ADAPTER`        | link modules                                |
-| `pool`                | registry + `STANDIN_MODULES` | read at run time                            |
-| `maxPerMechanic`      | 2                            | variety cap                                 |
-| `clearance`           | 0.5 m                        | gap between non-neighbouring footprints     |
-| `corridorLengths`     | 3, 4.5, 6, 8                 | tried by the search                         |
-| `corridorLegs`        | 0, 1.5, 3                    | second leg of a bent corridor               |
-| `branching`           | 4                            | candidates tried per step before backing up |
-| `searchBudget`        | 4000                         | candidates evaluated before the fallback    |
-| `jitter`              | 0.35                         | randomness against compactness              |
+| Field                 | Default                   | Meaning                                     |
+| --------------------- | ------------------------- | ------------------------------------------- |
+| `rooms`               | 8                         | puzzle rooms                                |
+| `start`, `finish`     | `LAB`, `EXIT_LOCK`        | anchors                                     |
+| `corridor`, `adapter` | `CORRIDOR`, `ADAPTER`     | link modules                                |
+| `pool`                | `ROOM_MODULES` (registry) | read at run time                            |
+| `maxPerMechanic`      | 2                         | variety cap                                 |
+| `setPieces`           | [1, 2]                    | authored set pieces per run, least and most |
+| `clearance`           | 0.5 m                     | gap between non-neighbouring footprints     |
+| `corridorLengths`     | 3, 4.5, 6, 8              | tried by the search                         |
+| `corridorLegs`        | 0, 1.5, 3                 | second leg of a bent corridor               |
+| `branching`           | 4                         | candidates tried per step before backing up |
+| `searchBudget`        | 4000                      | candidates evaluated before the fallback    |
+| `jitter`              | 0.35                      | randomness against compactness              |
 
 ## Adding a rule
 
@@ -94,11 +113,17 @@ to `chainProblems` in `checks.ts`.
 - `bun src/level/gen/plan-image.ts 17 [--rooms 12] [--straight]`: top-down
   plan, `out/gen/plan-17.png` (footprints by kind, doorways, the solution
   path, names).
-- `bun tools/solve.ts --seed 17`: plays the declared solution in the game.
-  `bun src/level/gen/solve-seeds.ts 1 12`: twelve seeds, four at a time.
+- `bun tools/check-seed.ts --seed 17`: everything at once (bot, visual lint
+  on automatic viewpoints, coverage sweep, tour sheets, map) with a summary
+  and an exit code; `--seeds 1..6 --parallel 3` for several.
+- `bun tools/solve.ts --seed 17`: plays the declared solution in the game;
+  a failed step leaves `out/solve/seed-17/fail-step-N/` (eyes, plan, events,
+  state). `bun tools/solve.ts --seeds 1..40 --parallel 4`: a table.
+- `bun tools/map.ts --seed 17`: the whole facility from above.
 - `bun src/level/gen/joints.ts 17`: visual lint (holes, z-fighting) from
   both sides of every doorway, doors closed and open, contact sheets in
-  `out/joints/17/`.
+  `out/joints/17/` (about 2.5 minutes a seed at the game's default
+  resolution; at a smaller window the button fixtures' edges were flagged).
 - In code: `planRun(17)` gives the mission and pieces; `allProblems(...)`
   from `checks.ts` runs every level check.
 - `bun src/level/gen/bench.ts`: build times with a breakdown.
@@ -122,7 +147,11 @@ flood is the largest share.
   earlier rooms are left out of the pool.
 - The straight continuation is guaranteed only for modules whose exit does
   not face back the way they were entered (no such module exists yet).
-- With few modules per mechanic, runs look alike (the stand-ins: four
-  mechanics, six modules).
+- Nine parametric rooms and eight slots: the records office, the freight
+  passage and the maintenance loft (the only rooms of their mechanics) are
+  in every run, and the records office always opens it. Variety comes from
+  which plate, impact and timed-door rooms (and set pieces) are chosen, the
+  order, the parameters, mirroring and the layout (see the statistics in
+  `fuzz.test.ts`, `SUBLEVEL_FUZZ=1`).
 - Fog and ambient are the hand-built level's (fog far 40 m in a facility
   50 x 35 m on average).

@@ -89,7 +89,7 @@ export async function drawRun(
   };
   let at = data.playerSpawn.position;
   for (const s of data.solution) {
-    if (s.do === "walk") {
+    if (s.do === "walk" || s.do === "climb") {
       line(at, s.to, [255, 60, 200]);
       at = s.to;
     }

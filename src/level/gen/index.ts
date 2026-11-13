@@ -70,12 +70,7 @@ export function planRun(
   config: GeneratorConfig = DEFAULT_CONFIG,
 ): RunPlan {
   const rng = createRng(hashString(`run/${seed}`));
-  const mission = chooseMission(
-    eligibleModules(config),
-    config.rooms,
-    config.maxPerMechanic,
-    rng,
-  );
+  const mission = chooseMission(eligibleModules(config), config, rng);
   const targets: Target[] = mission.map((room, i) => {
     const name = `r${i + 1}-${room.module.name}`;
     return {

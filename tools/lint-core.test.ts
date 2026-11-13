@@ -289,6 +289,30 @@ describe("findShimmer", () => {
     expect(run(base, jittered, depthImage(24)).clusters).toHaveLength(0);
   });
 
+  test("an edge with no depth or normal step that slides 3 px with the camera is ignored", () => {
+    // A frame band against its wall, close up: same normal, depth saturated.
+    const base = split(W, H, 24, RED, GREEN);
+    const jittered = [25, 26, 27, 25, 23].map((e) =>
+      split(W, H, e, RED, GREEN),
+    );
+    expect(run(base, jittered).clusters).toHaveLength(0);
+  });
+
+  test("the same 4 px band flipping in noise (not as one edge) is flagged", () => {
+    const base = split(W, H, 24, RED, GREEN);
+    const jittered = [0, 1, 2, 3, 4].map((frame) => {
+      const image = split(W, H, 24, RED, GREEN);
+      for (let y = 0; y < H; y++) {
+        for (let x = 22; x < 27; x++) {
+          if (noise(x, y, frame))
+            fillRect(image, x, y, 1, 1, x < 24 ? GREEN : RED);
+        }
+      }
+      return image;
+    });
+    expect(run(base, jittered).clusters.length).toBeGreaterThan(0);
+  });
+
   test("a thin line between same-material neighbours, no edge anywhere, is ignored", () => {
     const base = createImage(W, H, RED);
     const jittered = [0, 1, 2, 3, 4].map((f) => {

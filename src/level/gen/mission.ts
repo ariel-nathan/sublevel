@@ -2,23 +2,43 @@
  * The mission: which puzzle rooms a run has and in what order, decided
  * before any geometry. Pure and seeded.
  *
- * Rules (each one is a function below, checked by `missionProblems`):
- *   1. Only modules with role "middle", a real lock (`teaches` not "none"),
- *      no requirements from earlier rooms (`requires` empty: every module
- *      chosen supplies its own keys), and exactly one exit.
- *   2. As many distinct mechanics as the pool offers (up to the room count).
- *   3. No mechanic more than `maxPerMechanic` times, unless there are too
- *      few mechanics to fill the rooms otherwise.
- *   4. The first room of each mechanic is one of its easiest modules
- *      (teach, then test); later rooms of it are no easier.
- *   5. Difficulty never drops from one room to the next (ramps up), where
- *      the chosen rooms allow it with rules 4 and 6.
- *   6. No module twice in a row (and, where possible, no mechanic twice in
- *      a row).
+ * The pool (rule 0): modules with role "middle", a real lock (`teaches` not
+ * "none"), no requirements from earlier rooms (`requires` empty: every
+ * module supplies its own keys) and exactly one exit; a module whose `after`
+ * names a mechanic no other module of the pool teaches is left out.
+ *
+ * Rules, by precedence (a later rule gives way when it conflicts with an
+ * earlier one; `missionProblems` checks 1-5 and 7, `ramps` checks 6):
+ *   1. No module twice in a run, unless the pool has fewer modules than the
+ *      run has rooms (then none twice in a row). Authored set pieces
+ *      (`setPiece`): as many as the seed chooses within `setPieces`, each
+ *      at most once.
+ *   2. Teach, then test: a mechanic's first room is one of its easiest
+ *      modules in the pool; a module's `after` mechanics have all been
+ *      taught by earlier rooms; a module with `position: "first"` is the
+ *      run's first room whenever it is in the run.
+ *   3. As many distinct mechanics as the pool offers (up to the room count),
+ *      none more than `maxPerMechanic` times unless there are too few
+ *      mechanics to fill the rooms.
+ *   4. No two rooms in a row with the same mechanic or the same `idea`.
+ *   5. A module with `position: "early"` is in the first half of the run.
+ *   6. Difficulty never drops from one room to the next.
+ *   7. Preferably no two modules with the same `idea` in one run (a set
+ *      piece and the parametric room that re-takes its puzzle).
+ * Within these the choice is random: which modules (when the pool has more
+ * than the run needs), which set pieces, and the order among equals.
+ *
+ * How: the set pieces are drawn, then every set of `rooms` modules from the
+ * pool (without the set pieces not drawn) that can satisfy 1-3 is listed;
+ * the sets with the fewest shared ideas (7) are tried first, in a seeded
+ * random order, each ordered by a depth-first search with 2, 4, 5 and 6 as
+ * hard constraints (lowest difficulty first, random among equals). If no
+ * set can be ordered so, the search runs again without 5 and 6, then
+ * without 4 (pools too small for them).
  *
  * To add a rule: add a check to `missionProblems` (so the tests see it),
- * then make `chooseMission` respect it, as a hard constraint in `order`
- * or as a preference in its ranking.
+ * then make `chooseMission` respect it, as a set-level filter in
+ * `validSet`, a hard constraint in `order`, or a preference in the sorting.
  */
 import type { Rng } from "../../core/rng";
 import type { AnyRoomModule, Mechanic } from "../rooms/room";
@@ -27,11 +47,19 @@ export interface MissionRoom {
   module: AnyRoomModule;
   mechanic: Mechanic;
   difficulty: number;
-  /** True for the first (easiest) room of its mechanic. */
+  /** True for the first room of its mechanic in the run. */
   teaches: boolean;
 }
 
-/** Rule 1: can this module be a puzzle room of a generated run? */
+/** The parts of the generator's config the mission reads. */
+export interface MissionRules {
+  rooms: number;
+  maxPerMechanic: number;
+  /** Least and most authored set pieces per run. */
+  setPieces: readonly [number, number];
+}
+
+/** Rule 0: can this module be a puzzle room of a generated run? */
 export function eligible(
   module: AnyRoomModule,
   exitsOf: (module: AnyRoomModule) => number,
@@ -46,6 +74,17 @@ export function eligible(
   );
 }
 
+/** Drops modules whose prerequisites no other module of the pool teaches. */
+export function withPrerequisites(
+  pool: readonly AnyRoomModule[],
+): AnyRoomModule[] {
+  return pool.filter((m) =>
+    (m.after ?? []).every((need) =>
+      pool.some((o) => o !== m && o.teaches === need),
+    ),
+  );
+}
+
 function shuffle<T>(items: T[], rng: Rng): T[] {
   for (let i = items.length - 1; i > 0; i--) {
     const j = rng.int(0, i);
@@ -54,143 +93,277 @@ function shuffle<T>(items: T[], rng: Rng): T[] {
   return items;
 }
 
-/** How many rooms each mechanic gets (rules 2 and 3). */
-export function allocate(
-  mechanics: readonly Mechanic[],
-  rooms: number,
-  maxPerMechanic: number,
-): Map<Mechanic, number> {
-  const counts = new Map<Mechanic, number>();
-  if (mechanics.length === 0) return counts;
-  const cap = Math.max(maxPerMechanic, Math.ceil(rooms / mechanics.length));
-  let left = rooms;
-  for (const m of mechanics) {
-    if (left === 0) break;
-    counts.set(m, 1);
-    left--;
+/** The easiest difficulty of each mechanic in the pool. */
+function easiestOf(pool: readonly AnyRoomModule[]): Map<Mechanic, number> {
+  const out = new Map<Mechanic, number>();
+  for (const m of pool) {
+    out.set(m.teaches, Math.min(out.get(m.teaches) ?? Infinity, m.difficulty));
   }
-  while (left > 0) {
-    for (const m of mechanics) {
-      if (left === 0) break;
-      const c = counts.get(m)!;
-      if (c < cap) {
-        counts.set(m, c + 1);
-        left--;
-      }
+  return out;
+}
+
+const capOf = (rules: MissionRules, offered: number): number =>
+  Math.max(rules.maxPerMechanic, Math.ceil(rules.rooms / Math.max(1, offered)));
+
+/** How many modules of the pool a run can use at most, each once. */
+function usable(pool: readonly AnyRoomModule[], rules: MissionRules): number {
+  const sets = pool.filter((m) => m.setPiece).length;
+  return pool.length - sets + Math.min(sets, rules.setPieces[1]);
+}
+
+/** Pairs of modules sharing an idea in a list. */
+function sharedIdeas(list: readonly AnyRoomModule[]): number {
+  let n = 0;
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i].idea;
+      if (a !== undefined && a === list[j].idea && list[i] !== list[j]) n++;
     }
   }
-  return counts;
+  return n;
+}
+
+/** Every k-subset of 0..n-1, as index lists in lexicographic order. */
+function* subsets(n: number, k: number): Generator<number[]> {
+  const idx = Array.from({ length: k }, (_, i) => i);
+  if (k > n) return;
+  for (;;) {
+    yield [...idx];
+    let i = k - 1;
+    while (i >= 0 && idx[i] === n - k + i) i--;
+    if (i < 0) return;
+    idx[i]++;
+    for (let j = i + 1; j < k; j++) idx[j] = idx[j - 1] + 1;
+  }
 }
 
 /**
- * Chooses and orders `rooms` puzzle rooms from `pool` (already filtered by
- * `eligible`). Throws if the pool is empty.
+ * How strict an order search is: "strict" all of rules 2, 4, 5, 6;
+ * "no-ramp" without 5 and 6; "loose" without 4 either; "repeat" also
+ * without "first" (a pool too small to keep it and rule 1 both).
+ */
+type Level = "strict" | "no-ramp" | "loose" | "repeat";
+
+/**
+ * Chooses and orders `rules.rooms` puzzle rooms from `pool` (already
+ * filtered by `eligible`). Throws if the pool is empty.
  */
 export function chooseMission(
-  pool: readonly AnyRoomModule[],
-  rooms: number,
-  maxPerMechanic: number,
+  poolIn: readonly AnyRoomModule[],
+  rules: MissionRules,
   rng: Rng,
 ): MissionRoom[] {
+  const pool = withPrerequisites(
+    [...poolIn].sort((a, b) => (a.name < b.name ? -1 : 1)),
+  );
   if (pool.length === 0) {
     throw new Error("no eligible puzzle modules to build a run from");
   }
-  const byName = [...pool].sort((a, b) => (a.name < b.name ? -1 : 1));
-  const groups = new Map<Mechanic, AnyRoomModule[]>();
-  for (const m of byName) {
-    const list = groups.get(m.teaches) ?? [];
-    list.push(m);
-    groups.set(m.teaches, list);
-  }
-  const mechanics = shuffle([...groups.keys()].sort(), rng);
-  const counts = allocate(mechanics, rooms, maxPerMechanic);
+  const { rooms } = rules;
+  const easiest = easiestOf(pool);
 
-  // Pick the modules of each mechanic: an easiest one first, then the
-  // others not yet used, easier first, then round again.
-  const items: MissionRoom[] = [];
-  for (const mechanic of mechanics) {
-    const count = counts.get(mechanic) ?? 0;
-    if (count === 0) continue;
-    const list = shuffle([...groups.get(mechanic)!], rng).sort(
-      (a, b) => a.difficulty - b.difficulty,
-    );
-    const first = list[0];
-    const rest = list.slice(1);
-    const picks = [first];
-    for (let i = 0; picks.length < count; i++) {
-      picks.push(rest.length > 0 ? rest[i % rest.length] : first);
-    }
-    picks.forEach((module, i) =>
-      items.push({
-        module,
-        mechanic,
-        difficulty: module.difficulty,
-        teaches: i === 0,
-      }),
-    );
+  // Set pieces: how many and which (rule 1).
+  const pieces = shuffle(
+    pool.filter((m) => m.setPiece),
+    rng,
+  );
+  const [lo, hi] = rules.setPieces;
+  const count = Math.min(pieces.length, rng.int(lo, Math.max(lo, hi)));
+  const drawn = pieces.slice(0, count);
+  const plain = pool.filter((m) => !m.setPiece);
+  let candidates = [...plain, ...drawn];
+  let forced = new Set(drawn);
+  if (candidates.length < rooms) {
+    // Too few: every set piece may come.
+    candidates = [...pool];
+    forced = new Set();
   }
-  // Random tie-break keys, drawn once so the order search is deterministic.
-  const keys = new Map(items.map((item) => [item, rng.next()]));
-  return order(items, keys) ?? order(items, keys, false)!;
+  const keys = new Map(pool.map((m) => [m, rng.next()]));
+
+  const sets: AnyRoomModule[][] = [];
+  if (candidates.length >= rooms) {
+    // Rule 3 over the candidates: the mechanics that can be taught.
+    const teachable = new Set(
+      candidates
+        .filter((m) => m.difficulty === easiest.get(m.teaches))
+        .map((m) => m.teaches),
+    );
+    const want = Math.min(teachable.size, rooms);
+    const cap = capOf(rules, teachable.size);
+    const validSet = (list: AnyRoomModule[]): boolean => {
+      for (const f of forced) if (!list.includes(f)) return false;
+      const per = new Map<Mechanic, number>();
+      for (const m of list) per.set(m.teaches, (per.get(m.teaches) ?? 0) + 1);
+      if (per.size < want) return false;
+      for (const [mech, n] of per) {
+        if (n > cap) return false;
+        // Its first room must be one of its easiest (rule 2).
+        if (
+          !list.some(
+            (m) => m.teaches === mech && m.difficulty === easiest.get(mech),
+          )
+        )
+          return false;
+      }
+      return list.every((m) =>
+        (m.after ?? []).every((need) =>
+          list.some((o) => o !== m && o.teaches === need),
+        ),
+      );
+    };
+    let listed = 0;
+    for (const idx of subsets(candidates.length, rooms)) {
+      if (++listed > 20000) break;
+      const list = idx.map((i) => candidates[i]);
+      if (validSet(list)) sets.push(list);
+    }
+  }
+  if (sets.length === 0) {
+    // Repeats (the pool is too small), or no set satisfies rules 1-3: one
+    // of each candidate, then the least used again, within the cap.
+    const offered = new Set(candidates.map((m) => m.teaches)).size;
+    const cap = capOf(rules, offered);
+    const list = [...candidates].slice(0, rooms);
+    const per = new Map<AnyRoomModule, number>(list.map((m) => [m, 1]));
+    while (list.length < rooms) {
+      const mech = (m: AnyRoomModule) =>
+        list.filter((x) => x.teaches === m.teaches).length;
+      const next = [...candidates].sort(
+        (a, b) =>
+          Number(mech(a) >= cap) - Number(mech(b) >= cap) ||
+          per.get(a)! - per.get(b)! ||
+          keys.get(a)! - keys.get(b)!,
+      )[0];
+      per.set(next, per.get(next)! + 1);
+      list.push(next);
+    }
+    sets.push(list);
+  }
+  // Fewest shared ideas first (rule 7), random among equals.
+  const ranked = shuffle(
+    sets.map((list) => ({ list, twins: sharedIdeas(list) })),
+    rng,
+  ).sort((a, b) => a.twins - b.twins);
+
+  for (const level of ["strict", "no-ramp", "loose", "repeat"] as Level[]) {
+    let tries = 0;
+    for (const { list } of ranked) {
+      if (++tries > 400) break;
+      const found = order(list, rules, easiest, keys, level);
+      if (found) return found;
+    }
+  }
+  // Teach-first alone always has an order: easiest of each mechanic first.
+  return order(ranked[0].list, rules, easiest, keys, "loose", true)!;
 }
 
 /**
- * Depth-first search for an order: hard rules 4 (teach first) and, if
- * `distinct`, 6 (no module twice in a row); preferring the lowest
- * difficulty, then a different mechanic from the previous room, then the
- * random key.
+ * Depth-first search for an order of `list` under the rules of `level`
+ * (see the header), lowest difficulty first, then the random key.
  */
 function order(
-  items: MissionRoom[],
-  keys: Map<MissionRoom, number>,
-  distinct = true,
+  list: readonly AnyRoomModule[],
+  rules: MissionRules,
+  easiest: Map<Mechanic, number>,
+  keys: Map<AnyRoomModule, number>,
+  level: Level,
+  bare = false,
 ): MissionRoom[] | null {
-  const out: MissionRoom[] = [];
-  const used = new Set<MissionRoom>();
-  const taught = new Set<Mechanic>();
+  const n = list.length;
+  const half = Math.ceil(rules.rooms / 2);
+  const strict = level === "strict";
+  const neighbours = level === "strict" || level === "no-ramp";
+  const hasFirst =
+    level !== "repeat" && list.some((m) => m.position === "first");
+  const out: AnyRoomModule[] = [];
+  const used = new Array<boolean>(n).fill(false);
+  const taught = new Map<Mechanic, number>();
+  let budget = 20000;
+  const sorted = list
+    .map((m, i) => ({ m, i }))
+    .sort(
+      (a, b) =>
+        a.m.difficulty - b.m.difficulty || keys.get(a.m)! - keys.get(b.m)!,
+    );
+  const fits = (m: AnyRoomModule): boolean => {
+    const at = out.length;
+    const prev = out[at - 1];
+    if (!taught.has(m.teaches) && m.difficulty !== easiest.get(m.teaches))
+      return false;
+    if (bare) return true;
+    if (!(m.after ?? []).every((need) => taught.has(need))) return false;
+    if (at === 0 && hasFirst && m.position !== "first") return false;
+    if (prev === m) return false;
+    if (neighbours && prev) {
+      if (prev.teaches === m.teaches) return false;
+      if (m.idea !== undefined && prev.idea === m.idea) return false;
+    }
+    if (strict) {
+      if (m.position === "early" && at >= half) return false;
+      if (prev && m.difficulty < prev.difficulty) return false;
+    }
+    return true;
+  };
   const step = (): boolean => {
-    if (out.length === items.length) return true;
-    const prev = out[out.length - 1];
-    const options = items
-      .filter(
-        (item) =>
-          !used.has(item) &&
-          (item.teaches || taught.has(item.mechanic)) &&
-          !(distinct && prev && prev.module === item.module),
-      )
-      .sort(
-        (a, b) =>
-          a.difficulty - b.difficulty ||
-          Number(prev?.mechanic === a.mechanic) -
-            Number(prev?.mechanic === b.mechanic) ||
-          keys.get(a)! - keys.get(b)!,
-      );
-    for (const item of options) {
-      out.push(item);
-      used.add(item);
-      const fresh = item.teaches && !taught.has(item.mechanic);
-      if (fresh) taught.add(item.mechanic);
+    if (out.length === n) return true;
+    if (--budget < 0) return false;
+    const tried = new Set<AnyRoomModule>();
+    for (const { m, i } of sorted) {
+      if (used[i] || tried.has(m) || !fits(m)) continue;
+      tried.add(m);
+      used[i] = true;
+      out.push(m);
+      const fresh = !taught.has(m.teaches);
+      if (fresh) taught.set(m.teaches, out.length - 1);
       if (step()) return true;
+      if (fresh) taught.delete(m.teaches);
       out.pop();
-      used.delete(item);
-      if (fresh) taught.delete(item.mechanic);
+      used[i] = false;
     }
     return false;
   };
-  return step() ? out : null;
+  if (!step()) return null;
+  const seen = new Set<Mechanic>();
+  return out.map((module) => {
+    const teaches = !seen.has(module.teaches);
+    seen.add(module.teaches);
+    return {
+      module,
+      mechanic: module.teaches,
+      difficulty: module.difficulty,
+      teaches,
+    };
+  });
 }
 
-/** What is wrong with a mission, by the rules above (empty if nothing). */
+/** What is wrong with a mission, by rules 1-5 and 7 above (empty if nothing). */
 export function missionProblems(
   mission: readonly MissionRoom[],
-  pool: readonly AnyRoomModule[],
-  rooms: number,
-  maxPerMechanic: number,
+  poolIn: readonly AnyRoomModule[],
+  rules: MissionRules,
 ): string[] {
+  const pool = withPrerequisites(poolIn);
   const problems: string[] = [];
+  const { rooms } = rules;
   if (mission.length !== rooms) {
     problems.push(`${mission.length} rooms, not ${rooms}`);
   }
+  const modules = mission.map((r) => r.module);
+  const roomy = usable(pool, rules) >= rooms;
+  const easiest = easiestOf(pool);
+  // Rule 1.
+  const counts = new Map<AnyRoomModule, number>();
+  for (const m of modules) counts.set(m, (counts.get(m) ?? 0) + 1);
+  for (const [m, n] of counts) {
+    if (n > 1 && roomy) problems.push(`${m.name} ${n} times`);
+  }
+  const pieces = modules.filter((m) => m.setPiece).length;
+  const available = pool.filter((m) => m.setPiece).length;
+  if (roomy && pieces > rules.setPieces[1])
+    problems.push(`${pieces} set pieces`);
+  if (pieces < Math.min(rules.setPieces[0], available))
+    problems.push(`${pieces} set pieces, fewer than ${rules.setPieces[0]}`);
+  // Rule 3.
   const offered = new Set(pool.map((m) => m.teaches));
   const used = new Map<Mechanic, number>();
   for (const r of mission)
@@ -198,37 +371,58 @@ export function missionProblems(
   if (used.size < Math.min(offered.size, rooms)) {
     problems.push(`${used.size} mechanics of ${offered.size} offered`);
   }
-  const cap = Math.max(maxPerMechanic, Math.ceil(rooms / offered.size));
+  const cap = capOf(rules, offered.size);
   for (const [m, n] of used) {
     if (n > cap) problems.push(`${m} ${n} times`);
   }
-  const easiest = new Map<Mechanic, number>();
-  for (const m of pool) {
-    easiest.set(m.teaches, Math.min(easiest.get(m.teaches) ?? 9, m.difficulty));
-  }
-  const seen = new Map<Mechanic, number>();
+  // Rules 2, 4, 5.
+  const taught = new Set<Mechanic>();
+  const half = Math.ceil(rooms / 2);
+  const distinct = new Set(modules).size > 1;
   mission.forEach((r, i) => {
-    if (!pool.includes(r.module)) problems.push(`room ${i}: not in the pool`);
-    const first = seen.get(r.mechanic);
-    if (first === undefined) {
+    const m = r.module;
+    if (!pool.includes(m)) problems.push(`room ${i}: not in the pool`);
+    if (r.mechanic !== m.teaches || r.difficulty !== m.difficulty)
+      problems.push(`room ${i}: mechanic or difficulty misreported`);
+    if (!taught.has(r.mechanic)) {
       if (r.difficulty !== easiest.get(r.mechanic)) {
         problems.push(
           `room ${i}: ${r.mechanic} first appears above its easiest`,
         );
       }
-      seen.set(r.mechanic, r.difficulty);
-    } else if (r.difficulty < first) {
-      problems.push(`room ${i}: easier than the first ${r.mechanic} room`);
+      if (!r.teaches) problems.push(`room ${i}: should be marked as teaching`);
+    } else if (r.teaches) problems.push(`room ${i}: marked as teaching again`);
+    for (const need of m.after ?? []) {
+      if (!taught.has(need))
+        problems.push(`room ${i}: ${m.name} comes before ${need} is taught`);
     }
-    if (i > 0 && mission[i - 1].module === r.module) {
-      const distinctPossible = new Set(mission.map((x) => x.module)).size > 1;
-      if (distinctPossible)
-        problems.push(`room ${i}: same module twice in a row`);
+    if (
+      roomy &&
+      m.position === "first" &&
+      i > 0 &&
+      mission[0].module.position !== "first"
+    )
+      problems.push(`room ${i}: ${m.name} should be the first room`);
+    const prev = mission[i - 1]?.module;
+    if (prev === m && distinct)
+      problems.push(`room ${i}: same module twice in a row`);
+    if (roomy && prev) {
+      if (prev.teaches === m.teaches)
+        problems.push(`room ${i}: ${m.teaches} twice in a row`);
+      if (m.idea !== undefined && prev.idea === m.idea)
+        problems.push(`room ${i}: idea "${m.idea}" twice in a row`);
     }
+    if (roomy && m.position === "early" && i >= half)
+      problems.push(`room ${i}: ${m.name} should be in the first half`);
+    taught.add(r.mechanic);
   });
   return problems;
 }
 
-/** True if difficulty never drops along the mission (rule 5). */
+/** True if difficulty never drops along the mission (rule 6). */
 export const ramps = (mission: readonly MissionRoom[]): boolean =>
   mission.every((r, i) => i === 0 || r.difficulty >= mission[i - 1].difficulty);
+
+/** Pairs of rooms sharing an idea in a mission (rule 7, for statistics). */
+export const sharedIdeasOf = (mission: readonly MissionRoom[]): number =>
+  sharedIdeas(mission.map((r) => r.module));

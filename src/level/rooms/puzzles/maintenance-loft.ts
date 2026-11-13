@@ -16,11 +16,8 @@
  *   |  cabinets      crate          |              |
  *   +===============================|==============+
  *
- * PENDING: the solution format has no step for climbing onto props (a
- * `walk` is on brush floor only), so this module is not registered for the
- * generator; development levels can name it (`?rooms=maintenance-loft`).
- * Its declared solution expresses each climb as a `walk` whose target is
- * higher than the feet (prove.ts plays that as a walk holding jump).
+ * The declared solution climbs with `climb` steps (crate, stack, deck) and
+ * comes down off the deck's edge with a `walk` (a drop of about 2 m).
  *
  * Softlocks: none. Four crates, three needed, all on the floor where they
  * cannot be lost (the loft is open, and anything on it can be pushed or
@@ -85,7 +82,9 @@ export function loftLayout(p: MaintenanceLoftParams) {
   const half = PROP_SPECS.crate_wood.halfExtents.x;
   // The staircase: a stack of two against the loft, one step in front.
   const stack = { x: q(xl - half - 0.04), z: cz };
-  const step = { x: q(stack.x - 2 * half - 0.2), z: cz };
+  // A gap of 0.3 m: a crate set down a little off does not touch (and on a
+  // knock, topple) the stack.
+  const step = { x: q(stack.x - 2 * half - 0.3), z: cz };
   const button = {
     x: x1 - BUTTON_DEPTH,
     y: p.deck + 1.2,
@@ -93,6 +92,66 @@ export function loftLayout(p: MaintenanceLoftParams) {
   };
   const exitX = q(Math.min(xl - 2.4, x0 + 3.2));
   return { x0, xl, x1, z0, z1, cz, stack, step, button, exitX };
+}
+
+type Rect2 = { x0: number; z0: number; x1: number; z1: number };
+type Pt = { x: number; z: number };
+
+/**
+ * The shortest walk from `a` to `b` (design plane) keeping a player's
+ * half-width and a little clear of `blocks`, by way of their corners, inside
+ * `room`: the waypoints between `a` and `b` (none if the straight way is
+ * clear, or if there is no way at all).
+ */
+function route(a: Pt, b: Pt, blocks: Rect2[], room: Rect2): Pt[] {
+  const r = 0.36;
+  const free = (p: Pt, q: Pt): boolean => {
+    const n = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.z - p.z) / 0.05));
+    for (let j = 0; j <= n; j++) {
+      const x = p.x + ((q.x - p.x) * j) / n;
+      const z = p.z + ((q.z - p.z) * j) / n;
+      if (
+        blocks.some(
+          (o) => x > o.x0 - r && x < o.x1 + r && z > o.z0 - r && z < o.z1 + r,
+        )
+      )
+        return false;
+    }
+    return true;
+  };
+  const d = r + 0.06;
+  const nodes: Pt[] = [a, b];
+  for (const o of blocks) {
+    for (const x of [o.x0 - d, o.x1 + d]) {
+      for (const z of [o.z0 - d, o.z1 + d]) {
+        if (x >= room.x0 && x <= room.x1 && z >= room.z0 && z <= room.z1)
+          nodes.push({ x: q(x), z: q(z) });
+      }
+    }
+  }
+  // Dijkstra over the visibility graph (a few dozen nodes).
+  const dist = nodes.map(() => Infinity);
+  const prev = nodes.map(() => -1);
+  const done = nodes.map(() => false);
+  dist[0] = 0;
+  for (;;) {
+    let u = -1;
+    for (let i = 0; i < nodes.length; i++)
+      if (!done[i] && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
+    if (u < 0 || u === 1) break;
+    done[u] = true;
+    for (let v = 0; v < nodes.length; v++) {
+      if (done[v]) continue;
+      const w = Math.hypot(nodes[v].x - nodes[u].x, nodes[v].z - nodes[u].z);
+      if (dist[u] + w < dist[v] && free(nodes[u], nodes[v])) {
+        dist[v] = dist[u] + w;
+        prev[v] = u;
+      }
+    }
+  }
+  const out: Pt[] = [];
+  for (let v = prev[1]; v > 0; v = prev[v]) out.unshift(nodes[v]);
+  return out;
 }
 
 function build(
@@ -194,11 +253,18 @@ function build(
   for (let x = x0 + 1.2; x + 0.6 < exitX - 0.95 - 0.1; x += 0.65) {
     cabinet(k, x, z0, x + 0.6, z0 + 0.5, rng.next() < 0.5 ? 1.4 : 1.9, "+z");
   }
-  // A machine tool on the right, clear of the base.
+  // Obstacles on the workshop floor (design boxes), for the solution's
+  // routes below.
+  const blocks: { x0: number; z0: number; x1: number; z1: number }[] = [
+    { x0: x0, z0: z1 - 0.8, x1: x0 + 2.2, z1 },
+    { x0: x0 + 1.2, z0, x1: exitX - 0.95, z1: z0 + 0.5 },
+  ];
+  // A machine tool on the right, clear of the base and of the way to it.
   const mx0 = q(x0 + 3.0);
-  if (mx0 + 1.6 < base.x0 - 0.6) {
+  if (mx0 + 1.6 < base.x0 - 0.6 && cz < z1 - 1.8) {
     B(mx0, 0, z1 - 1.1, mx0 + 1.6, 1.0, z1 - 0.2, "metal_panel");
     B(mx0 + 0.2, 1.0, z1 - 0.9, mx0 + 0.6, 1.5, z1 - 0.5, "rubber_dark");
+    blocks.push({ x0: mx0, z0: z1 - 1.1, x1: mx0 + 1.6, z1: z1 - 0.2 });
   }
   signX(k, x0, 1, z0 + 0.6, -s.entryHalf - 0.45, 1.4, 2.0);
   lamp(k, q(x0 + p.floor * 0.4), 0, h, COOL, 7.5, 1.1);
@@ -216,27 +282,46 @@ function build(
   const crates = spots.map((c) =>
     k.propTurned("crate_wood", c.x, 0, c.z, rng.range(-0.15, 0.15)),
   );
+  for (const c of spots) {
+    blocks.push({
+      x0: c.x - 0.46,
+      z0: c.z - 0.46,
+      x1: c.x + 0.46,
+      z1: c.z + 0.46,
+    });
+  }
 
   // --- Solution ------------------------------------------------------------------
   const P = s.P;
-  const from = P(q(step.x - 1.6), cz);
-  const down = q(cz > 0 ? cz - 0.85 : cz + 0.85);
+  const fx = q(step.x - 1.6);
+  const from = P(fx, cz);
+  // Beside the staircase, a quarter metre clear of it (the gap in the rail
+  // leaves 1.3 m either side of the climb spot).
+  const down = q(cz > 0 ? cz - 0.95 : cz + 0.95);
+  // From the entry to the staging point: the shortest way round the crates
+  // and furniture (by their corners).
+  const via = route({ x: 0.8, z: 0 }, { x: fx, z: cz }, blocks, {
+    x0: x0 + 0.35,
+    z0: z0 + 0.35,
+    x1: xl - 0.35,
+    z1: z1 - 0.35,
+  });
   const solution: SolutionStep[] = [
+    ...via.map((m): SolutionStep => ({ do: "walk", to: P(m.x, m.z) })),
     { do: "walk", to: from },
     { do: "carry", prop: crates[0], to: F.point(stack.x, half, stack.z) },
     { do: "walk", to: from },
     { do: "carry", prop: crates[1], to: F.point(stack.x, 3 * half, stack.z) },
     { do: "walk", to: from },
     { do: "carry", prop: crates[2], to: F.point(step.x, half, step.z) },
-    { do: "walk", to: from },
-    // The climbs (feet heights rise: see the header).
-    { do: "walk", to: F.point(step.x, 2 * half, step.z) },
-    { do: "walk", to: F.point(stack.x, 4 * half, stack.z) },
-    { do: "walk", to: F.point(xl + 0.8, H, cz) },
+    // A run-up, then up the staircase onto the deck.
+    { do: "walk", to: P(q(step.x - 1.0), cz) },
+    { do: "climb", to: F.point(step.x, 2 * half, step.z) },
+    { do: "climb", to: F.point(stack.x, 4 * half, stack.z) },
+    { do: "climb", to: F.point(xl + 0.8, H, cz) },
     { do: "walk", to: F.point(button.x - 1.0, H, button.z) },
     { do: "press", button: toggle.id },
-    // Down off the loft's edge beside the staircase (the gap in the rail
-    // leaves 0.85 m either side of it), and out.
+    // Down off the loft's edge beside the staircase, and out.
     { do: "walk", to: F.point(xl + 0.5, H, down) },
     { do: "walk", to: P(xl - 1.0, down) },
     { do: "walk", to: P(step.x - 0.9, down) },

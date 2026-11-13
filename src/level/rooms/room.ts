@@ -264,6 +264,28 @@ export interface RoomModule<P = Record<string, never>> {
   requires: Requirements;
   /** Entry doorway sizes it can be built from, inclusive ranges in metres. */
   entrySize: { width: [number, number]; height: [number, number] };
+  /**
+   * Mechanics an earlier room of a generated run must have taught before
+   * this one (a room that combines mechanics lists them). Default: none.
+   */
+  after?: readonly Mechanic[];
+  /**
+   * Where in a generated run it belongs: "first" (the run's first puzzle
+   * room whenever it is in the run: a gentle teacher), "early" (in the
+   * first half). Default: anywhere.
+   */
+  position?: "first" | "early";
+  /**
+   * An authored set piece (a hand-built room of Kestrel Annex): at most once
+   * per run, and only as many per run as the generator's config allows.
+   */
+  setPiece?: boolean;
+  /**
+   * The puzzle's idea, when another module shares it (a re-take of the same
+   * puzzle): modules with the same idea are never next to each other in a
+   * run, and preferably not in the same run.
+   */
+  idea?: string;
   /** The parameters used when none are given. */
   defaults: P;
   /** A random choice of parameters within the module's stated ranges. */

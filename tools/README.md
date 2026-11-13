@@ -30,7 +30,7 @@ hand-built level (Kestrel Annex). `--seeds A..B` and `--count K [--from A]`
 | `bun run solve [--seed N \| --rooms a,b \| --seeds A..B \| --count K --from A] [--parallel P] [--keep-going] [--frames] [--verbose]` | Plays ANY level from its declared `LevelData.solution` alone (`solve.ts`, steps carried out by `solver.ts`) and checks it ends finished. Many seeds: a table (seed, level, steps, simulated time, wall time, result, failing step). Exit 1 if any fails. About 9 s a level.                                                                | transcript and PASS/FAIL on stdout; `out/solve/end.png` (`out/solve/seed-N/` for a chosen level); on failure `fail-step-N/` (see below)                                                                                          |
 | `bun run fuzz`                                                                                                                       | `solve --count 20 --from 1 --parallel 4`: twenty seeds, four sessions at a time.                                                                                                                                                                                                                                                           | table on stdout                                                                                                                                                                                                                  |
 | `bun tools/check-seed.ts --seed N` (or `--seeds A..B`, `--count K`)                                                                  | Everything checkable about one generated level, exit 1 on any failure: solve, visual lint on the automatic viewpoints (0 holes, 0 shimmer), generic coverage sweep (0 magenta px), tour sheets and overview map are saved. Prints one summary per seed with times.                                                                         | `out/check/<tag>/map.png`, `tour/sheet-*.png`, `lint/`, `coverage/`, `solve/fail-step-N/`                                                                                                                                        |
-| `bun tools/map.ts [--seed N \| --rooms a,b]` (`bun run map`)                                                                         | Top-down plan of a whole level, without a browser: brushes at floor level, zones tinted (Z0...), doors cyan, buttons yellow (impact orange), plates magenta, props orange, lights pale dots, spawn green, exit box green, declared solution as a blue numbered polyline (suffix C carry, U push, P press, T throw).                        | `out/map/<annex\|seed-N\|rooms-a-b>.png`                                                                                                                                                                                         |
+| `bun tools/map.ts [--seed N \| --rooms a,b]` (`bun run map`)                                                                         | Top-down plan of a whole level, without a browser: brushes at floor level, zones tinted (Z0...), doors cyan, buttons yellow (impact orange), plates magenta, props orange, lights pale dots, spawn green, exit box green, declared solution as a blue numbered polyline (suffix C carry, U push, P press, T throw, J climb).               | `out/map/<annex\|seed-N\|rooms-a-b>.png`                                                                                                                                                                                         |
 | `bun tools/coverage-sweep.ts [--seed N] [--step 1.5]`                                                                                | Generic hole finder: eye positions over the open floor of every zone (grid of `--step` m, eight directions plus up and down, crouch and eye height) in the `coverage` view, doors closed then every door opened; counts magenta pixels. Exit 1 if any.                                                                                     | counts on stdout; `out/coverage/<tag>/hole-*.png` for the first holes                                                                                                                                                            |
 | `bun tools/push-check.ts`                                                                                                            | Proves the solver's `push` step: plays to the storage room and pushes the 60 kg metal crate out from the shelves, up to and onto the (flush) pressure plate, and checks that `plate_down` and door B's opening follow.                                                                                                                     | transcript; `out/push-check/end.png`                                                                                                                                                                                             |
 | `bun tools/room-plan.ts [module\|annex] [--facing +x\|-x\|+z\|-z] [--mirror] [--seed N]`                                             | Top-down plan of a room module (default: every registered module) or of Kestrel Annex, without a browser. (`--seed` here seeds the module's parameters; for a whole generated level use `map.ts`.)                                                                                                                                         | `out/room-plan/<name>.png`: brushes grey by height, props orange, buttons yellow, doors cyan, plates magenta, footprint red, doorways green, solution path blue                                                                  |
@@ -141,7 +141,28 @@ the real physics to within 3 cm), waits for the held prop to stop swinging,
 then refines from where it actually hangs. The first throw of the hand-built
 level hits (and from every standing spot tried); retries (at most 3) aim 10 cm
 higher and then 10 cm lower, because a tumbling crate that grazes the target's
-rim does not count.
+rim does not count. A retry fetches the missed prop again only if it landed
+within reach (low, in the throwing spot's acoustic zone); otherwise it takes
+the nearest other throwable there (carriable, at least 1 kg, not used by an
+earlier step, not on a plate).
+
+Climbing (`{ do: "climb", to }`, e.g. the maintenance loft's crate
+staircase): the bot faces the point and jumps with a run at it, but keeps
+its edge distance (the surface's edge plus half a body width) until its feet
+are up at the landing height, so that it does not run into the side of a
+stacked crate and shove it off; then it walks onto the spot. It waits for firm
+footing first (a jump pressed while a crate underfoot still rocks is not
+taken). A try that falls short goes back to where the step began; later tries
+creep in at half speed, then back off along the crate's top for a running
+jump (a jump from a standstill keeps almost no speed in the air); four tries
+in all (`CLIMB_STYLES`). Falling off the crate the climb began on, it takes a
+run-up on the floor and climbs back onto it first. A `walk` to a point lower
+than the feet (off a ledge or a crate, up to 2.5 m) walks to just before the
+edge, creeps over it, brakes in the air and lands, then finishes the walk:
+running off would carry the player two metres past the edge. Set-downs carry
+the prop no lower than it was picked up nor than the release height, then
+tilt to the release height over the point (tilting first dragged a crate
+taken off a ledge into the ledge).
 
 When a step fails, `<out>/fail-step-N/` (`out/solve/` or `out/solve/<tag>/`)
 has what is needed to diagnose it without re-running:
@@ -220,10 +241,11 @@ Pilot actions (all deterministic, built on `__harness.step`):
 - `throwAt(x, y, z, lift = 0)`: faces the point and throws the held body with
   the pitch solved for a ballistic arc from where it hangs once settled (speed
   by mass); `lift` aims that many metres above the point.
-- `setDown(x, y, z, stand, pitchDeg)`: tilts to `pitchDeg` first (so the body
-  is carried at that height), walks straight to `stand`, faces the point and
-  lets go; returns where the body came to rest. The solver gets `stand` and
-  the pitch from `carryPlan` (src/level/rooms/solution.ts) or from the step.
+- `setDown(x, y, z, stand, pitchDeg)`: walks straight to `stand` carrying the
+  body no lower than it was picked up nor than `pitchDeg` holds it, faces the
+  point, tilts to `pitchDeg` and lets go; returns where the body came to rest.
+  The solver gets `stand` and the pitch from `carryPlan`
+  (src/level/rooms/solution.ts) or from the step.
 - `pushTo(bodyId, x, z, approach, tolerance)`: stands behind a body
   (`approach(position)` says where) and walks into it towards the point, a
   stretch at a time, re-approaching when it drifts; returns its final position.

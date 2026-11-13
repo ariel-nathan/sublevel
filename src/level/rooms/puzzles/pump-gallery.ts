@@ -379,6 +379,7 @@ export const PUMP_GALLERY: RoomModule<PumpGalleryParams> = {
   teaches: "timed-door",
   difficulty: 2,
   requires: {},
+  idea: "timed-door-wedge",
   entrySize: ENTRY_SIZE,
   defaults: {
     length: 14.5,

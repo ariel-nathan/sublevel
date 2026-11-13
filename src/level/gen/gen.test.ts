@@ -5,7 +5,7 @@
  * over 200).
  */
 import { describe, expect, test } from "bun:test";
-import { createRng } from "../../core/rng";
+import { createRng, hashString } from "../../core/rng";
 import { assembleLevel } from "../assemble";
 import { fingerprintLevel } from "../fingerprint";
 import { boxOf, containsPoint } from "../geometry";
@@ -28,11 +28,18 @@ import {
   planRun,
 } from "./index";
 import { LayoutSearch } from "./layout";
-import { allocate, chooseMission, missionProblems, ramps } from "./mission";
-import { STANDIN_PLATE } from "./modules/standin-plate";
-import { STANDIN_SWITCH } from "./modules/standin-switch";
-import { STANDIN_TARGET } from "./modules/standin-target";
+import {
+  chooseMission,
+  missionProblems,
+  ramps,
+  sharedIdeasOf,
+} from "./mission";
 import { facilityName } from "./names";
+import { FREIGHT_PASSAGE } from "../rooms/puzzles/freight-passage";
+import { GENERATOR_HALL } from "../rooms/puzzles/generator-hall";
+import { GOODS_BAY } from "../rooms/puzzles/goods-bay";
+import { PUMP_GALLERY } from "../rooms/puzzles/pump-gallery";
+import { RECORDS_OFFICE } from "../rooms/puzzles/records-office";
 
 const FUZZ = process.env.SUBLEVEL_FUZZ === "1";
 const SEEDS = FUZZ
@@ -59,79 +66,162 @@ describe("determinism", () => {
 
 describe("the mission", () => {
   const pool = eligibleModules();
+  const rules = DEFAULT_CONFIG;
+  const names = (mission: { module: AnyRoomModule }[]) =>
+    mission.map((r) => r.module.name);
+  const missionOf = (seed: number) =>
+    chooseMission(pool, rules, createRng(hashString(`run/${seed}`)));
 
-  test("the pool: middle modules with a real lock and no outside requirements", () => {
+  test("the pool: the registry's middle modules with a real lock and no outside requirements", () => {
     for (const m of pool) {
       expect(m.role).toBe("middle");
       expect(m.teaches).not.toBe("none");
     }
-    const names = pool.map((m) => m.name);
-    expect(names).toContain("standin-switch");
-    expect(names).toContain("filtration-hall");
-    expect(names).not.toContain("corridor");
+    expect(names(pool.map((module) => ({ module }))).sort()).toEqual([
+      "decon-lock",
+      "fan-room",
+      "filtration-hall",
+      "freight-passage",
+      "generator-hall",
+      "goods-bay",
+      "maintenance-loft",
+      "parts-store",
+      "pump-gallery",
+      "records-office",
+      "storage",
+      "valve-chamber",
+    ]);
     const needy: AnyRoomModule = {
-      ...STANDIN_PLATE,
+      ...GOODS_BAY,
       name: "needy",
       requires: { carryMass: 25 },
     };
-    const config = { ...DEFAULT_CONFIG, pool: () => [needy, STANDIN_SWITCH] };
+    const config = { ...DEFAULT_CONFIG, pool: () => [needy, RECORDS_OFFICE] };
     expect(eligibleModules(config).map((m) => m.name)).toEqual([
-      "standin-switch",
+      "records-office",
     ]);
   });
 
-  test("rules hold over many seeds, and difficulty ramps up", () => {
-    for (let seed = 1; seed <= 60; seed++) {
-      const mission = chooseMission(pool, 8, 2, createRng(seed));
-      expect([seed, missionProblems(mission, pool, 8, 2)]).toEqual([seed, []]);
+  test("rules hold over 200 seeds: authors' order, set pieces, every mechanic, the ramp", () => {
+    const mechanics = new Set(pool.map((m) => m.teaches));
+    for (let seed = 1; seed <= 200; seed++) {
+      const mission = missionOf(seed);
+      const list = names(mission);
+      const at = (name: string) => list.indexOf(name);
+      expect([seed, missionProblems(mission, pool, rules)]).toEqual([seed, []]);
       expect([seed, ramps(mission)]).toEqual([seed, true]);
-      const mechanics = new Set(mission.map((r) => r.mechanic));
-      expect(mechanics.size).toBe(new Set(pool.map((m) => m.teaches)).size);
+      expect(new Set(mission.map((r) => r.mechanic)).size).toBe(mechanics.size);
+      // The authors' advice (src/level/README.md).
+      expect([seed, list[0]]).toEqual([seed, "records-office"]);
+      expect(at("freight-passage")).toBeLessThan(4);
+      for (const [a, b] of [
+        ["goods-bay", "parts-store"],
+        ["generator-hall", "fan-room"],
+        ["pump-gallery", "decon-lock"],
+        ["filtration-hall", "decon-lock"],
+      ]) {
+        if (at(a) >= 0 && at(b) >= 0) expect(at(a)).toBeLessThan(at(b));
+      }
+      const decon = at("decon-lock");
+      if (decon >= 0) {
+        const before = mission.slice(0, decon).map((r) => r.mechanic);
+        expect(before).toContain("weighted-plate");
+        expect(before).toContain("timed-door");
+      }
+      // One or two set pieces, each once; never the set piece and its
+      // parametric re-take together.
+      const pieces = mission.filter((r) => r.module.setPiece);
+      expect(pieces.length).toBeGreaterThanOrEqual(1);
+      expect(pieces.length).toBeLessThanOrEqual(2);
+      expect(new Set(list).size).toBe(list.length);
+      expect([seed, sharedIdeasOf(mission)]).toEqual([seed, 0]);
     }
   });
 
-  test("allocation: every mechanic once, then up to the cap; more once variety runs out", () => {
-    const four = allocate(
-      ["push", "climb", "timed-door", "impact-target"],
-      8,
-      2,
-    );
-    expect([...four.values()]).toEqual([2, 2, 2, 2]);
-    const two = allocate(["push", "climb"], 8, 2);
-    expect([...two.values()]).toEqual([4, 4]);
-    const many = allocate(
-      [
-        "push",
-        "climb",
-        "timed-door",
-        "impact-target",
-        "weighted-plate",
-        "toggle-button",
-      ],
-      3,
-      2,
-    );
-    expect([...many.values()]).toEqual([1, 1, 1]);
+  test("runs differ: first rooms are the gentlest teacher, but sets, orders and set pieces vary", () => {
+    const sequences = new Set<string>();
+    const sets = new Set<string>();
+    const pieces = new Set<string>();
+    for (let seed = 1; seed <= 200; seed++) {
+      const list = names(missionOf(seed));
+      sequences.add(list.join(">"));
+      sets.add([...list].sort().join(","));
+      for (const n of list) {
+        if (pool.find((m) => m.name === n)?.setPiece) pieces.add(n);
+      }
+    }
+    expect(sequences.size).toBeGreaterThan(100);
+    expect(sets.size).toBeGreaterThan(10);
+    expect([...pieces].sort()).toEqual([
+      "filtration-hall",
+      "storage",
+      "valve-chamber",
+    ]);
   });
 
   test("teach then test: the first room of a mechanic is its easiest", () => {
     const hard: AnyRoomModule = {
-      ...STANDIN_TARGET,
+      ...GENERATOR_HALL,
       name: "hard-target",
       difficulty: 3,
+      idea: undefined,
     };
     for (let seed = 1; seed <= 30; seed++) {
       const mission = chooseMission(
-        [hard, STANDIN_TARGET, STANDIN_SWITCH],
-        4,
-        2,
+        [hard, GENERATOR_HALL, RECORDS_OFFICE],
+        { ...rules, rooms: 3 },
         createRng(seed),
       );
-      const targets = mission.filter((r) => r.mechanic === "impact-target");
-      expect(targets[0].module.name).toBe("standin-target");
-      for (let i = 1; i < mission.length; i++) {
-        expect(mission[i].module).not.toBe(mission[i - 1].module);
-      }
+      expect(names(mission)).toEqual([
+        "records-office",
+        "generator-hall",
+        "hard-target",
+      ]);
+    }
+  });
+
+  test("prerequisites: a module comes after the mechanics it names, or not at all", () => {
+    const combo: AnyRoomModule = {
+      ...PUMP_GALLERY,
+      name: "combo",
+      difficulty: 1,
+      idea: undefined,
+      after: ["push"],
+    };
+    const small = { ...rules, rooms: 3 };
+    for (let seed = 1; seed <= 30; seed++) {
+      const list = names(
+        chooseMission(
+          [combo, FREIGHT_PASSAGE, GOODS_BAY],
+          small,
+          createRng(seed),
+        ),
+      );
+      expect(list.indexOf("freight-passage")).toBeLessThan(
+        list.indexOf("combo"),
+      );
+    }
+    // Nothing in the pool teaches "push": the module is left out.
+    const list = names(
+      chooseMission([combo, GOODS_BAY, RECORDS_OFFICE], small, createRng(1)),
+    );
+    expect(list).not.toContain("combo");
+  });
+
+  test("a pool too small for the run: modules repeat, never twice in a row", () => {
+    for (let seed = 1; seed <= 20; seed++) {
+      const mission = chooseMission(
+        [GOODS_BAY, RECORDS_OFFICE],
+        { ...rules, rooms: 5 },
+        createRng(seed),
+      );
+      expect(mission.length).toBe(5);
+      expect(
+        missionProblems(mission, [GOODS_BAY, RECORDS_OFFICE], {
+          ...rules,
+          rooms: 5,
+        }),
+      ).toEqual([]);
     }
   });
 
@@ -139,12 +229,12 @@ describe("the mission", () => {
     const config: GeneratorConfig = {
       ...DEFAULT_CONFIG,
       rooms: 2,
-      pool: () => [STANDIN_SWITCH, STANDIN_PLATE],
+      pool: () => [RECORDS_OFFICE, GOODS_BAY],
     };
     const run = planRun(9, config);
-    expect(run.mission.map((r) => r.module.name).sort()).toEqual([
-      "standin-plate",
-      "standin-switch",
+    expect(run.mission.map((r) => r.module.name)).toEqual([
+      "records-office",
+      "goods-bay",
     ]);
   });
 });

@@ -393,6 +393,54 @@ export function stableBoundaryMask(
   return mask;
 }
 
+/**
+ * Material boundaries that move with the camera without breaking up: along
+ * a row or a column, a run of fewer than `maxRun` unstable pixels between a
+ * stable pixel of one colour and a stable pixel of another, where in every
+ * frame the run reads as the first colour then the second with a single
+ * change (an edge that slid by a few pixels). A near edge whose relief is
+ * too shallow for the depth and normals views (a 10 cm frame band against
+ * its wall, a lit button knob) does this; z-fighting breaks up instead. The
+ * run's pixels are marked.
+ */
+export function movingEdgeMask(
+  frames: readonly Image[],
+  stable: Uint8Array,
+  maxRun = 5,
+): Uint8Array {
+  const base = frames[0];
+  const { width, height } = base;
+  const mask = emptyMask(base);
+  const scan = (start: number, step: number, count: number) => {
+    for (let i = 0; i < count - 1; i++) {
+      const p = start + i * step;
+      if (!stable[p] || stable[p + step]) continue;
+      // An unstable run after a stable pixel: find its end.
+      let n = 1;
+      while (i + n < count && !stable[p + n * step] && n <= maxRun) n++;
+      if (n > maxRun || i + n >= count) continue;
+      const q = p + n * step;
+      if (colourDelta(base, p, q) === 0) continue;
+      const ok = frames.every((f) => {
+        let changes = 0;
+        for (let k = 0; k < n; k++) {
+          const a = p + k * step;
+          const b = a + step;
+          if (colourDelta(f, a, b) > 0) changes++;
+          // Every pixel is one of the two end colours (the ends are stable).
+          if (colourDelta(f, b, p) > 0 && colourDelta(f, b, q) > 0)
+            return false;
+        }
+        return changes === 1;
+      });
+      if (ok) for (let k = 1; k < n; k++) mask[p + k * step] = 1;
+    }
+  };
+  for (let y = 0; y < height; y++) scan(y * width, 1, width);
+  for (let x = 0; x < width; x++) scan(x, width, height);
+  return mask;
+}
+
 export type Colour3 = readonly [number, number, number];
 
 /** Pixels that have one of `colours` in any of the frames. */
@@ -479,6 +527,7 @@ export function findShimmer(
     discontinuityMask(normals, normalStep),
   );
   edges = orMask(edges, stableBoundaryMask(base, stable));
+  edges = orMask(edges, movingEdgeMask(frames, stable));
   if (input.cutouts && input.cutouts.length > 0) {
     edges = orMask(edges, colourMask(frames, input.cutouts));
   }

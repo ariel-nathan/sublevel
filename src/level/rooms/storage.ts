@@ -215,6 +215,8 @@ export const STORAGE: RoomModule = {
   teaches: "weighted-plate",
   difficulty: 1,
   requires: {},
+  setPiece: true,
+  idea: "crates-on-plate",
   // The entry opening is the corridor's whole cross-section, framed by the
   // jambs above; the room's dressing is laid out round exactly that.
   entrySize: { width: [2.5, 2.5], height: [2.8, 2.8] },

@@ -443,6 +443,11 @@ export interface LevelOptions {
 export type SolutionStep =
   /** Walk in a straight line to a point on the floor. */
   | { do: "walk"; to: Vec3 }
+  /**
+   * Jump or step up onto a higher surface (a prop or a ledge) so that the
+   * feet end at `to`.
+   */
+  | { do: "climb"; to: Vec3 }
   /** Go to a wall button within reach and press it with the use key. */
   | { do: "press"; button: string }
   /**

@@ -194,11 +194,16 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
     record(event);
     switch (event.type) {
       case "impact": {
-        const strength = Math.min(1, event.impulse / 60);
+        // Level follows impact strength; pitch stays within about a
+        // semitone either way so one object keeps sounding like itself.
+        const strength = Math.min(1, event.impulse / 50);
+        if (strength < 0.04) {
+          break;
+        }
         audio.play(IMPACTS[event.surface], {
           position: event.position,
-          gain: 0.25 + 0.75 * strength,
-          pitch: 1.15 - 0.3 * strength + vary() * 0.1,
+          gain: 0.1 + 0.9 * strength ** 0.8,
+          pitch: 1.08 - 0.16 * strength + (vary() - 0.5) * 0.06,
         });
         break;
       }
@@ -219,15 +224,17 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
     switch (event.type) {
       case "footstep":
         audio.play(FOOTSTEPS[surfaceOf(event.on)], {
-          gain: 0.5,
-          pitch: 0.92 + vary() * 0.16,
+          // The audio module rotates several takes per surface, so only a
+          // little pitch variation is needed.
+          gain: player.crouched ? 0.25 : 0.5,
+          pitch: 0.96 + vary() * 0.08,
         });
         break;
       case "jump":
         audio.play("jump");
         break;
       case "land":
-        audio.play("land", { gain: Math.min(1, event.speed / 8) });
+        audio.play("land", { gain: Math.min(1, 0.3 + event.speed / 10) });
         break;
       case "pickup":
         audio.play("pickup");

@@ -6,14 +6,7 @@ import { PLAYER, PROP_SPECS } from "../core/props";
 import { AirGrid } from "./airgrid";
 import { LightBaker, SEE_THROUGH_OPACITY } from "./bake";
 import { coplanarOverlaps, describeOverlap, levelRects } from "./coplanar";
-import {
-  BUTTON_DEPTH,
-  DOOR_INSET,
-  GRATE_THICKNESS,
-  HALL_CONNECTOR,
-  IMPACT_BUTTON_DEPTH,
-  PIT,
-} from "./define";
+import { assembleKestrelAnnex } from "./define";
 import {
   boxesOverlap,
   boxOf,
@@ -37,7 +30,16 @@ import {
   SEE_THROUGH_MATERIALS,
 } from "./meshgen";
 import { TriangleGrid } from "./raymesh";
+import { describeEgressLock } from "./rooms/egress-lock";
 import { describeFiltrationHall } from "./rooms/filtration-hall";
+import {
+  BUTTON_DEPTH,
+  DOOR_INSET,
+  GRATE_THICKNESS,
+  IMPACT_BUTTON_DEPTH,
+} from "./rooms/room";
+import { PIT } from "./rooms/service-corridor";
+import { describeValveChamber } from "./rooms/valve-chamber";
 
 const start = performance.now();
 const level = buildLevel();
@@ -48,7 +50,14 @@ const brushes = data.brushes.map(boxOf);
 const propBoxes = data.props.map(propBox);
 const doorBoxes = data.doors.map((d) => boxOf(d.closed));
 const brushIndex = new BoxIndex(brushes);
-const HALL = describeFiltrationHall(HALL_CONNECTOR);
+// Facts of the second puzzle space, from the modules placed in the annex.
+const ROOMS = assembleKestrelAnnex().rooms;
+const placedAt = (name: string) => ROOMS.find((r) => r.name === name)!.at;
+const HALL = {
+  ...describeFiltrationHall(placedAt("hall")),
+  ...describeValveChamber(placedAt("chamber")),
+  lock: describeEgressLock(placedAt("lock")),
+};
 
 /** Run speed of the player (src/player/tuning.ts RUN_SPEED). */
 const RUN_SPEED = 5.6;

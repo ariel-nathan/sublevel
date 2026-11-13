@@ -26,7 +26,9 @@ import {
   lookToward,
   routeBetween,
   standPoint,
+  planThrow,
   throwPitch,
+  wrapDeg,
   type Look,
   type Point2,
   type Point3,
@@ -588,12 +590,36 @@ export class Pilot {
   }
 
   /**
-   * Throws the held body so that its arc passes through (x, y, z): faces
-   * the point, then solves the pitch for a ballistic arc from where the
-   * body actually hangs (throw speed and lift from src/player/tuning.ts),
-   * re-aiming a few times as the hold point moves with the pitch.
+   * Steps until the held body has stopped moving relative to the view (less
+   * than 3 mm over 3 steps), for at most `max` steps. The hold lags behind
+   * the view, more so for heavy props; a throw from a swinging body is off.
    */
-  async throwAt(x: number, y: number, z: number): Promise<boolean> {
+  private async settleHeld(held: number, max = 90): Promise<void> {
+    const at = async (): Promise<Point3 | null> =>
+      (await this.bodies()).find((b) => b.id === held)?.position ?? null;
+    let prev = await at();
+    for (let n = 0; n < max; n += 3) {
+      await this.raw(3);
+      const now = await at();
+      if (
+        prev &&
+        now &&
+        Math.hypot(now.x - prev.x, now.y - prev.y, now.z - prev.z) < 0.003
+      ) {
+        return;
+      }
+      prev = now;
+    }
+  }
+
+  /**
+   * Throws the held body so that its centre passes through (x, y + lift, z):
+   * a first guess from the hold geometry (`planThrow`), then refined from
+   * where the body actually hangs once it has settled (speed by mass and the
+   * upward bias from src/player/tuning.ts), until yaw and pitch stop moving.
+   * `lift` aims above the point; retries use it to vary the hit.
+   */
+  async throwAt(x: number, y: number, z: number, lift = 0): Promise<boolean> {
     const state = await this.state();
     const held = state.player.heldBody;
     if (held === null) {
@@ -603,17 +629,30 @@ export class Pilot {
     const tag = state.bodies.find((b) => b.id === held)?.tag ?? "";
     const spec = PROP_SPECS[tag as keyof typeof PROP_SPECS];
     const speed = throwSpeed(spec ? spec.mass : PLAYER.maxCarryMass);
-    let pitch = 20;
-    for (let i = 0; i < 4; i++) {
-      const eye = await this.eye();
-      const yaw = lookToward(eye, { x, y: eye.y, z }).yawDeg;
+    const first = planThrow(
+      await this.eye(),
+      { x, y, z },
+      speed,
+      this.holdDistance(state, held),
+      lift,
+      THROW_UP,
+    );
+    if (!first) {
+      this.log(`throwAt: (${f(x)}, ${f(y)}, ${f(z)}) is out of range`);
+      return false;
+    }
+    let look: Look = first.look;
+    for (let i = 0; i < 8; i++) {
+      await this.look(look.yawDeg, look.pitchDeg, true);
+      await this.settleHeld(held);
       const body = (await this.bodies()).find((b) => b.id === held);
       if (!body) {
         break;
       }
+      const yawDeg = lookToward(body.position, { x, y, z }).yawDeg;
       const solved = throwPitch(
         horizontalDistance(body.position, { x, z }),
-        y - body.position.y,
+        y + lift - body.position.y,
         speed,
         THROW_UP,
       );
@@ -621,14 +660,21 @@ export class Pilot {
         this.log(`throwAt: (${f(x)}, ${f(y)}, ${f(z)}) is out of range`);
         return false;
       }
-      pitch = solved;
-      await this.look(yaw, pitch, true);
-      await this.raw(12);
+      const moved = Math.max(
+        Math.abs(solved - look.pitchDeg),
+        Math.abs(wrapDeg(yawDeg - look.yawDeg)),
+      );
+      look = { yawDeg, pitchDeg: solved };
+      if (moved < 0.1) {
+        break;
+      }
     }
+    await this.look(look.yawDeg, look.pitchDeg, true);
+    await this.settleHeld(held);
     await this.raw(1, { primaryPressed: true });
     await this.note(
-      `throwAt(${f(x)}, ${f(y)}, ${f(z)})`,
-      `pitch ${f(pitch, 1)} speed ${f(speed, 1)}`,
+      `throwAt(${f(x)}, ${f(y)}, ${f(z)}${lift ? `, lift ${f(lift)}` : ""})`,
+      `pitch ${f(look.pitchDeg, 1)} speed ${f(speed, 1)}`,
     );
     return true;
   }

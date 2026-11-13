@@ -1,5 +1,11 @@
 /**
  * `bun tools/lint-visual.ts [--only <substring>] [--out <dir>] [--self-test]`
+ * `bun tools/lint-visual.ts --seed N | --rooms a,b | --auto [...]`
+ *
+ * Without --seed/--rooms/--auto the fixed viewpoints of the hand-built level
+ * (views.ts) are used; with any of them the viewpoints are derived from the
+ * level (auto-views.ts) and every door is opened by openAllDoors (doors.ts)
+ * for the "open" state. Output then goes to out/lint/<tag>/.
  *
  * Automatic visual defect detection from the tour viewpoints, in both door
  * states. Exit code 0 when nothing is flagged, 1 otherwise, 2 on a tool error.
@@ -21,7 +27,11 @@
  * Annotated images go to out/lint/ for flagged view-states only.
  */
 import { join } from "node:path";
+import type { LevelData } from "../src/core/api";
+import { autoViews } from "./auto-views";
 import { launchGame, type GameSession } from "./browser";
+import { openAllDoors } from "./doors";
+import { isSelected, levelQuery, levelSelector, levelTag } from "./level-args";
 import { parseArgs } from "./cli";
 import type { Image } from "./image";
 import {
@@ -222,102 +232,153 @@ async function selfTest(
   };
 }
 
-async function main(): Promise<boolean> {
-  const started = Date.now();
-  const args = parseArgs(process.argv.slice(2), ["self-test"]);
-  const out = args.options.get("out") ?? "out/lint";
-  const views = selectViews(VIEWS, args.options.get("only"));
-  if (views.length === 0) {
-    throw new Error(`no viewpoint matches "${args.options.get("only")}"`);
+/** Throws unless the renderer's coverage and material debug views are real. */
+export async function probeDebugViews(
+  session: GameSession,
+  view: Viewpoint,
+): Promise<void> {
+  await setPose(session, poseOf(view));
+  await setDebugView(session, "coverage");
+  const coverageProbe = await grabFrame(session);
+  await setDebugView(session, "material");
+  const materialProbe = await grabFrame(session);
+  await setDebugView(session, "none");
+  if (!looksLikeCoverage(coverageProbe) || !looksLikeMaterial(materialProbe)) {
+    throw new Error(
+      "the renderer's coverage/material debug views are not available in this build",
+    );
   }
-  const session = await launchGame();
-  try {
-    const pilot = new Pilot(session, { run: "lint", outDir: "out" });
+}
 
-    // The debug views must be real in this build.
-    await setPose(session, poseOf(views[0]));
-    await setDebugView(session, "coverage");
-    const coverageProbe = await grabFrame(session);
-    await setDebugView(session, "material");
-    const materialProbe = await grabFrame(session);
-    await setDebugView(session, "none");
-    if (
-      !looksLikeCoverage(coverageProbe) ||
-      !looksLikeMaterial(materialProbe)
-    ) {
-      throw new Error(
-        "the renderer's coverage/material debug views are not available in this build",
+export interface LintRun {
+  rows: ViewResult[];
+  flagged: ViewResult[];
+  holeStates: number;
+  shimmerStates: number;
+}
+
+/**
+ * Lints every view with doors closed, then `openDoors` is called and every
+ * view is linted again. Annotated images of flagged view-states go to `out`.
+ */
+export async function lintViews(
+  session: GameSession,
+  views: readonly Viewpoint[],
+  out: string,
+  openDoorsFn: () => Promise<void>,
+): Promise<LintRun> {
+  const rows: ViewResult[] = [];
+  const runState = async (doors: DoorState): Promise<void> => {
+    for (const view of views) {
+      const result = await lintView(session, view, doors);
+      if (isFlagged(result)) {
+        await writeAnnotations(session, view, result, out);
+      }
+      rows.push(result);
+    }
+  };
+  await runState("closed");
+  await openDoorsFn();
+  await runState("open");
+  const flagged = rows.filter(isFlagged);
+  return {
+    rows,
+    flagged,
+    holeStates: rows.filter((r) => r.holePixels > 0).length,
+    shimmerStates: rows.filter((r) => r.shimmerClusters.length > 0).length,
+  };
+}
+
+/** Table of one line per view, then the clusters of anything flagged. */
+export function printLint(views: readonly Viewpoint[], run: LintRun): void {
+  const { rows, flagged } = run;
+  const w = Math.max(...views.map((v) => v.name.length), 4);
+  const cell = (r: ViewResult | undefined): string => {
+    if (!r) {
+      return "-";
+    }
+    return isFlagged(r)
+      ? `FLAG shimmer ${r.shimmerPixels}px holes ${r.holePixels}px`
+      : `ok (${r.explainedPixels} edge px)`;
+  };
+  console.log(`${"view".padEnd(w)}  ${"closed".padEnd(26)}  open`);
+  for (const view of views) {
+    const closed = rows.find(
+      (r) => r.view === view.name && r.doors === "closed",
+    );
+    const open = rows.find((r) => r.view === view.name && r.doors === "open");
+    console.log(
+      `${view.name.padEnd(w)}  ${cell(closed).padEnd(26)}  ${cell(open)}`,
+    );
+  }
+  for (const r of flagged) {
+    if (r.shimmerClusters.length > 0) {
+      console.log(
+        `  ${r.view} (${r.doors}) shimmer: ${r.shimmerClusters.slice(0, 6).map(box).join("; ")}`,
       );
     }
+    if (r.holePixels > 0) {
+      console.log(
+        `  ${r.view} (${r.doors}) holes: ${r.holeClusters.slice(0, 6).map(box).join("; ")}`,
+      );
+    }
+  }
+}
+
+async function main(): Promise<boolean> {
+  const started = Date.now();
+  const args = parseArgs(process.argv.slice(2), ["self-test", "auto"]);
+  const sel = levelSelector(args);
+  const auto = args.options.has("auto") || isSelected(sel);
+  const out =
+    args.options.get("out") ??
+    (isSelected(sel) ? `out/lint/${levelTag(sel)}` : "out/lint");
+  const session = await launchGame({ query: levelQuery(sel) });
+  try {
+    const pilot = new Pilot(session, { run: "lint", outDir: "out" });
+    let all: readonly Viewpoint[] = VIEWS;
+    if (auto) {
+      const level = await session.evaluate<LevelData>("__game.level.data");
+      all = autoViews(level);
+      console.log(`automatic viewpoints: ${all.length} for "${level.name}"`);
+    }
+    const views = selectViews(all, args.options.get("only"));
+    if (views.length === 0) {
+      throw new Error(`no viewpoint matches "${args.options.get("only")}"`);
+    }
+
+    // The debug views must be real in this build.
+    await probeDebugViews(session, views[0]);
 
     let selfTestResult: { ok: boolean; line: string } | null = null;
     if (args.options.has("self-test")) {
       selfTestResult = await selfTest(session, out);
     }
 
-    const rows: ViewResult[] = [];
-    const runState = async (doors: DoorState): Promise<void> => {
-      for (const view of views) {
-        const result = await lintView(session, view, doors);
-        if (isFlagged(result)) {
-          await writeAnnotations(session, view, result, out);
+    const run = await lintViews(session, views, out, async () => {
+      if (auto) {
+        const report = await openAllDoors(session);
+        if (report.failed.length > 0) {
+          console.log(
+            `warning: doors not opened: ${report.failed.map((f) => f.door).join(", ")}`,
+          );
         }
-        rows.push(result);
+      } else {
+        await openDoors(pilot);
       }
-    };
-    await runState("closed");
-    await openDoors(pilot);
-    await runState("open");
-
-    // Summary: one line per view, both door states side by side.
-    const w = Math.max(...views.map((v) => v.name.length), 4);
-    const cell = (r: ViewResult | undefined): string => {
-      if (!r) {
-        return "-";
-      }
-      return isFlagged(r)
-        ? `FLAG shimmer ${r.shimmerPixels}px holes ${r.holePixels}px`
-        : `ok (${r.explainedPixels} edge px)`;
-    };
-    console.log(`${"view".padEnd(w)}  ${"closed".padEnd(26)}  open`);
-    for (const view of views) {
-      const closed = rows.find(
-        (r) => r.view === view.name && r.doors === "closed",
-      );
-      const open = rows.find((r) => r.view === view.name && r.doors === "open");
-      console.log(
-        `${view.name.padEnd(w)}  ${cell(closed).padEnd(26)}  ${cell(open)}`,
-      );
-    }
-
-    const flagged = rows.filter(isFlagged);
-    for (const r of flagged) {
-      if (r.shimmerClusters.length > 0) {
-        console.log(
-          `  ${r.view} (${r.doors}) shimmer: ${r.shimmerClusters.slice(0, 6).map(box).join("; ")}`,
-        );
-      }
-      if (r.holePixels > 0) {
-        console.log(
-          `  ${r.view} (${r.doors}) holes: ${r.holeClusters.slice(0, 6).map(box).join("; ")}`,
-        );
-      }
-    }
-    const holeStates = rows.filter((r) => r.holePixels > 0).length;
-    const shimmerStates = rows.filter(
-      (r) => r.shimmerClusters.length > 0,
-    ).length;
+    });
+    printLint(views, run);
     if (selfTestResult) {
       console.log(`\n${selfTestResult.line}`);
     }
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
-    const passed = flagged.length === 0 && (selfTestResult?.ok ?? true);
+    const passed = run.flagged.length === 0 && (selfTestResult?.ok ?? true);
     console.log(
-      `\n${passed ? "PASS" : "FAIL"}: ${rows.length} view-states checked: ` +
-        `${holeStates} with holes, ${shimmerStates} with shimmer` +
+      `\n${passed ? "PASS" : "FAIL"}: ${run.rows.length} view-states checked: ` +
+        `${run.holeStates} with holes, ${run.shimmerStates} with shimmer` +
         `${selfTestResult ? `, self-test ${selfTestResult.ok ? "ok" : "FAILED"}` : ""} ` +
         `(${seconds} s)` +
-        `${flagged.length > 0 ? `. Annotated images in ${out}/` : ""}`,
+        `${run.flagged.length > 0 ? `. Annotated images in ${out}/` : ""}`,
     );
     return passed;
   } finally {
@@ -325,13 +386,15 @@ async function main(): Promise<boolean> {
   }
 }
 
-main().then(
-  (ok) => process.exit(ok ? 0 : 1),
-  (error) => {
-    console.error(
-      "lint-visual failed:",
-      error instanceof Error ? error.message : error,
-    );
-    process.exit(2);
-  },
-);
+if (import.meta.main) {
+  main().then(
+    (ok) => process.exit(ok ? 0 : 1),
+    (error) => {
+      console.error(
+        "lint-visual failed:",
+        error instanceof Error ? error.message : error,
+      );
+      process.exit(2);
+    },
+  );
+}

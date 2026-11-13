@@ -16,6 +16,11 @@ import {
   FRAME_PALETTE_OFFSET,
   interleaveVertices,
   isRawDebugView,
+  LIGHT_BOUNDS_FADE,
+  LIGHT_FLOATS,
+  lightBoundsFade,
+  lightRelevance,
+  UNBOUNDED_EXTENT,
   ITEM_FLOATS,
   linearToSrgb,
   MAX_LIGHTS,
@@ -169,6 +174,98 @@ test("selectLights prefers a bright light over a dim one at equal distance", () 
   expect(selectLights([dim, bright], v3.create(0, 0, 0), 1)).toEqual([bright]);
 });
 
+// --- Light bounds -----------------------------------------------------------
+
+const BOX = { min: v3.create(0, 0, 0), max: v3.create(4, 3, 6) };
+
+test("lightBoundsFade is 1 without bounds and in the middle of a box", () => {
+  expect(lightBoundsFade(undefined, 100, 100, 100)).toBe(1);
+  expect(lightBoundsFade(BOX, 2, 1.5, 3)).toBe(1);
+});
+
+test("lightBoundsFade is 0 on and outside the faces", () => {
+  expect(lightBoundsFade(BOX, 0, 1.5, 3)).toBe(0);
+  expect(lightBoundsFade(BOX, 4, 1.5, 3)).toBe(0);
+  expect(lightBoundsFade(BOX, 2, 3, 3)).toBe(0);
+  expect(lightBoundsFade(BOX, -1, 1.5, 3)).toBe(0);
+  expect(lightBoundsFade(BOX, 2, 1.5, 7)).toBe(0);
+});
+
+test("lightBoundsFade ramps smoothly over the fade band inside a face", () => {
+  const half = lightBoundsFade(BOX, LIGHT_BOUNDS_FADE / 2, 1.5, 3);
+  expect(half).toBeCloseTo(0.5, 6);
+  expect(lightBoundsFade(BOX, LIGHT_BOUNDS_FADE, 1.5, 3)).toBe(1);
+  const quarter = lightBoundsFade(BOX, LIGHT_BOUNDS_FADE / 4, 1.5, 3);
+  expect(quarter).toBeGreaterThan(0);
+  expect(quarter).toBeLessThan(half);
+  // Far face too, and axes multiply.
+  expect(lightBoundsFade(BOX, 4 - LIGHT_BOUNDS_FADE / 2, 1.5, 3)).toBeCloseTo(
+    0.5,
+    6,
+  );
+  expect(
+    lightBoundsFade(BOX, LIGHT_BOUNDS_FADE / 2, 1.5, 6 - LIGHT_BOUNDS_FADE / 2),
+  ).toBeCloseTo(0.25, 6);
+});
+
+test("packFrameUniforms encodes bounds, and unbounded lights as a huge box", () => {
+  const out = new Float32Array(FRAME_FLOATS);
+  const bounded: PointLight = { ...light(1, 1), bounds: BOX };
+  packFrameUniforms(
+    {
+      viewProj: mat4.identity(),
+      camera: {
+        position: v3.create(0, 0, 0),
+        orientation: quat.identity(),
+        fovY: 1,
+        near: 0.1,
+        far: 100,
+      },
+      ambient: v3.create(0, 0, 0),
+      fog: { color: v3.create(0, 0, 0), near: 1, far: 10 },
+      time: 0,
+      lights: [bounded, light(2, 2)],
+    },
+    out,
+  );
+  const l0 = FRAME_LIGHTS_OFFSET;
+  expect(Array.from(out.subarray(l0 + 8, l0 + 16))).toEqual([
+    0, 0, 0, 1, 4, 3, 6, 0,
+  ]);
+  const l1 = FRAME_LIGHTS_OFFSET + LIGHT_FLOATS;
+  expect(out[l1 + 11]).toBe(0);
+  expect(out[l1 + 8]).toBe(-Math.fround(UNBOUNDED_EXTENT));
+  expect(out[l1 + 12]).toBe(Math.fround(UNBOUNDED_EXTENT));
+});
+
+test("lightRelevance discounts a light whose box is away from the camera", () => {
+  const eye = v3.create(2, 2, 0);
+  const plain = light(2, 0);
+  const inside: PointLight = {
+    ...plain,
+    bounds: { min: v3.create(0, 0, -3), max: v3.create(4, 3, 3) },
+  };
+  const away: PointLight = {
+    ...plain,
+    bounds: { min: v3.create(0, 0, 2), max: v3.create(4, 3, 8) },
+  };
+  expect(lightRelevance(inside, eye)).toBe(lightRelevance(plain, eye));
+  expect(lightRelevance(away, eye)).toBeLessThan(lightRelevance(plain, eye));
+});
+
+test("selectLights prefers a light containing the camera over a bounded neighbour", () => {
+  const eye = v3.create(0, 2, 0);
+  const here: PointLight = {
+    ...light(0, 3),
+    bounds: { min: v3.create(-3, 0, -3), max: v3.create(3, 4, 5) },
+  };
+  const next: PointLight = {
+    ...light(0, -3),
+    bounds: { min: v3.create(-3, 0, -20), max: v3.create(3, 4, -4) },
+  };
+  expect(selectLights([next, here], eye, 1)).toEqual([here]);
+});
+
 // --- Frame uniforms ---------------------------------------------------------
 
 test("packFrameUniforms lays out camera, fog, counts and lights", () => {
@@ -201,12 +298,43 @@ test("packFrameUniforms lays out camera, fog, counts and lights", () => {
   expect(out[29]).toBe(12.5);
   expect(new Uint32Array(out.buffer)[32]).toBe(2);
   const l0 = FRAME_LIGHTS_OFFSET;
-  expect(Array.from(out.subarray(l0, l0 + 8))).toEqual([
-    1, 2, 2, 5, 0.5, 0.5, 0.5, 1,
+  const E = Math.fround(UNBOUNDED_EXTENT);
+  expect(Array.from(out.subarray(l0, l0 + 16))).toEqual([
+    1,
+    2,
+    2,
+    5,
+    0.5,
+    0.5,
+    0.5,
+    1,
+    -E,
+    -E,
+    -E,
+    0,
+    E,
+    E,
+    E,
+    0,
   ]);
-  const l1 = FRAME_LIGHTS_OFFSET + 8;
-  expect(Array.from(out.subarray(l1, l1 + 8))).toEqual([
-    3, 2, 4, 5, 2, 2, 2, 0,
+  const l1 = FRAME_LIGHTS_OFFSET + LIGHT_FLOATS;
+  expect(Array.from(out.subarray(l1, l1 + 16))).toEqual([
+    3,
+    2,
+    4,
+    5,
+    2,
+    2,
+    2,
+    0,
+    -E,
+    -E,
+    -E,
+    0,
+    E,
+    E,
+    E,
+    0,
   ]);
 });
 
@@ -235,9 +363,10 @@ test("packFrameUniforms clamps the light count and degenerate fog", () => {
 });
 
 test("frame and item layouts match the WGSL structs", () => {
-  // Frame: mat4 + 5 vec4 header, then MAX_LIGHTS lights of 2 vec4.
+  // Frame: mat4 + 5 vec4 header, then MAX_LIGHTS lights of 4 vec4.
   expect(FRAME_LIGHTS_OFFSET).toBe(16 + 5 * 4);
-  expect(FRAME_FLOATS * 4).toBe(144 + MAX_LIGHTS * 32 + MAX_PALETTE * 16);
+  expect(LIGHT_FLOATS).toBe(16);
+  expect(FRAME_FLOATS * 4).toBe(144 + MAX_LIGHTS * 64 + MAX_PALETTE * 16);
   expect(sceneWgsl).toContain(`const MAX_PALETTE: u32 = ${MAX_PALETTE}u;`);
   // Item: mat4 + 5 vec4.
   expect(ITEM_FLOATS).toBe(16 + 5 * 4);

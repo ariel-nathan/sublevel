@@ -17,12 +17,18 @@ const VIEW_DEPTH: u32 = 3u;
 const VIEW_NORMALS: u32 = 4u;
 const VIEW_LIGHTING: u32 = 5u;
 const DEPTH_RANGE: f32 = 40.0;
+// Width of the fade inside each face of a light's bounds box (LIGHT_BOUNDS_FADE).
+const LIGHT_BOUNDS_FADE: f32 = 0.25;
 
 struct Light {
   // xyz = position, w = radius
   posRadius: vec4f,
   // rgb = color * intensity, w = 1 if baked into level vertex colours
   colorBaked: vec4f,
+  // xyz = bounds min, w = 1 if the light is confined to its bounds
+  boundsMin: vec4f,
+  // xyz = bounds max
+  boundsMax: vec4f,
 }
 
 struct Frame {
@@ -132,11 +138,20 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
       if (baked && l.colorBaked.w > 0.5) {
         continue;
       }
+      var confine = 1.0;
+      if (l.boundsMin.w > 0.5) {
+        let inside = min(in.world - l.boundsMin.xyz, l.boundsMax.xyz - in.world);
+        let f = smoothstep(vec3f(0.0), vec3f(LIGHT_BOUNDS_FADE), inside);
+        confine = f.x * f.y * f.z;
+        if (confine <= 0.0) {
+          continue;
+        }
+      }
       let toLight = l.posRadius.xyz - in.world;
       let d = length(toLight);
       let falloff = clamp(1.0 - d / l.posRadius.w, 0.0, 1.0);
       let ndotl = max(dot(n, toLight / max(d, 1e-4)), 0.0);
-      light += l.colorBaked.rgb * (falloff * falloff * ndotl);
+      light += l.colorBaked.rgb * (falloff * falloff * ndotl * confine);
     }
   }
 

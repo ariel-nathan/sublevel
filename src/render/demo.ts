@@ -3,10 +3,12 @@
  * and a small test room; the camera orbits on its own.
  * Query parameters: ?h=<internal height> (default 240), ?stress=1 adds
  * several hundred extra boxes and 48 dynamic lights, ?t=<seconds> freezes
- * the animation at that time.
+ * the animation at that time, ?bounds=1 confines the flickering light to a
+ * box (z from -5 to -2), ?view=<debug view> picks a diagnostic view, so its cut-off and soft edge can be inspected.
  */
 import { clamp, mat4, quat, v3, type Mat4, type Vec3 } from "../math";
 import type {
+  DebugView,
   DrawItem,
   MeshHandle,
   PointLight,
@@ -22,6 +24,7 @@ const canvas = document.getElementById("view") as HTMLCanvasElement;
 const params = new URLSearchParams(location.search);
 const internalHeight = Number(params.get("h") ?? 240) || 240;
 const stress = params.get("stress") === "1";
+const confineFlicker = params.get("bounds") === "1";
 const frozenTime = params.has("t") ? Number(params.get("t")) : null;
 
 // ---------------------------------------------------------------------------
@@ -321,6 +324,10 @@ async function start(): Promise<void> {
     internalHeight,
   });
   renderer.resize(window.innerWidth, window.innerHeight);
+  const view = params.get("view");
+  if (view) {
+    renderer.setDebugView(view as DebugView);
+  }
   window.addEventListener("resize", () =>
     renderer.resize(window.innerWidth, window.innerHeight),
   );
@@ -450,6 +457,9 @@ async function start(): Promise<void> {
     radius: 4.5,
     intensity: 1,
     baked: false,
+    bounds: confineFlicker
+      ? { min: v3.create(-4, -1, -5), max: v3.create(4, 4, -2) }
+      : undefined,
   };
   const lights = [...STEADY, flicker, ...extraLights];
   const items: DrawItem[] = [...statics, ...props, spinner];

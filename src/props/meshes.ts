@@ -281,43 +281,105 @@ export function buildButtonMeshes(): {
     tileSize: 0.25,
     skip: ["nz"],
   });
-  const knob = (material: MaterialId): MeshData => {
-    const b = new MeshBuilder(material);
-    const z0 = front;
-    const z1 = 0;
-    const out = v(0, 0, 1);
-    const centre = b.addVertex(v(0, 0, z1), out, { u: 0.5, v: 0.5 });
-    const capRim: number[] = [];
-    const sideBottom: number[] = [];
-    const sideTop: number[] = [];
-    for (let i = 0; i <= BUTTON_SEGMENTS; i++) {
-      const angle = (i / BUTTON_SEGMENTS) * Math.PI * 2;
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const x = cos * BUTTON_LIT_RADIUS;
-      const y = sin * BUTTON_LIT_RADIUS;
-      capRim.push(
-        b.addVertex(v(x, y, z1), out, {
-          u: 0.5 + cos * 0.5,
-          v: 0.5 - sin * 0.5,
-        }),
-      );
-      const outward = v(cos, sin, 0);
-      const u = i / BUTTON_SEGMENTS;
-      sideBottom.push(b.addVertex(v(x, y, z0), outward, { u, v: 1 }));
-      sideTop.push(b.addVertex(v(x, y, z1), outward, { u, v: 0 }));
-    }
-    for (let i = 0; i < BUTTON_SEGMENTS; i++) {
-      b.addTriangle(centre, capRim[i], capRim[i + 1]);
-      b.addTriangle(sideBottom[i], sideBottom[i + 1], sideTop[i + 1]);
-      b.addTriangle(sideBottom[i], sideTop[i + 1], sideTop[i]);
-    }
-    return b.build();
-  };
   return {
     bezel: bezel.build(),
-    red: knob("button_red"),
-    green: knob("button_green"),
+    red: knobMesh("button_red", BUTTON_LIT_RADIUS, BUTTON_LIT_HEIGHT),
+    green: knobMesh("button_green", BUTTON_LIT_RADIUS, BUTTON_LIT_HEIGHT),
+  };
+}
+
+/** A short lit cylinder whose cap (at z = 0) is the button face. */
+function knobMesh(
+  material: MaterialId,
+  radius: number,
+  height: number,
+): MeshData {
+  const b = new MeshBuilder(material);
+  const z0 = -height;
+  const z1 = 0;
+  const out = v(0, 0, 1);
+  const centre = b.addVertex(v(0, 0, z1), out, { u: 0.5, v: 0.5 });
+  const capRim: number[] = [];
+  const sideBottom: number[] = [];
+  const sideTop: number[] = [];
+  for (let i = 0; i <= BUTTON_SEGMENTS; i++) {
+    const angle = (i / BUTTON_SEGMENTS) * Math.PI * 2;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const x = cos * radius;
+    const y = sin * radius;
+    capRim.push(
+      b.addVertex(v(x, y, z1), out, {
+        u: 0.5 + cos * 0.5,
+        v: 0.5 - sin * 0.5,
+      }),
+    );
+    const outward = v(cos, sin, 0);
+    const u = i / BUTTON_SEGMENTS;
+    sideBottom.push(b.addVertex(v(x, y, z0), outward, { u, v: 1 }));
+    sideTop.push(b.addVertex(v(x, y, z1), outward, { u, v: 0 }));
+  }
+  for (let i = 0; i < BUTTON_SEGMENTS; i++) {
+    b.addTriangle(centre, capRim[i], capRim[i + 1]);
+    b.addTriangle(sideBottom[i], sideBottom[i + 1], sideTop[i + 1]);
+    b.addTriangle(sideBottom[i], sideTop[i + 1], sideTop[i]);
+  }
+  return b.build();
+}
+
+/**
+ * Impact button unit (same frame as the wall button, +Z out of the wall): a
+ * 0.34 m hazard-striped plate, a metal inset on it, and a larger lit knob in
+ * the centre. The level places `ButtonDef.position` IMPACT_DEPTH in front of
+ * the wall. The plate is sunk IMPACT_EMBED into the wall and stands
+ * IMPACT_DEPTH - IMPACT_PLATE_FRONT proud of it.
+ */
+export const IMPACT_DEPTH = 0.07;
+export const IMPACT_EMBED = 0.01;
+export const IMPACT_BEZEL_HALF = 0.17;
+/** Plate front face (negative: behind the button face). */
+export const IMPACT_PLATE_FRONT = -0.04;
+export const IMPACT_INSET_HALF = 0.12;
+export const IMPACT_INSET_FRONT = -0.025;
+export const IMPACT_LIT_RADIUS = 0.085;
+export const IMPACT_LIT_HEIGHT = 0.025;
+
+export function buildImpactButtonMeshes(): {
+  stripe: MeshData;
+  inset: MeshData;
+  red: MeshData;
+  green: MeshData;
+} {
+  const back = -IMPACT_DEPTH - IMPACT_EMBED;
+  const stripe = new MeshBuilder("hazard_stripe");
+  const sh = IMPACT_BEZEL_HALF;
+  box(
+    stripe,
+    0,
+    0,
+    (IMPACT_PLATE_FRONT + back) / 2,
+    sh,
+    sh,
+    (IMPACT_PLATE_FRONT - back) / 2,
+    { tileSize: 0.17, skip: ["nz"] },
+  );
+  const inset = new MeshBuilder("metal_panel");
+  const ih = IMPACT_INSET_HALF;
+  box(
+    inset,
+    0,
+    0,
+    (IMPACT_INSET_FRONT + IMPACT_PLATE_FRONT) / 2,
+    ih,
+    ih,
+    (IMPACT_INSET_FRONT - IMPACT_PLATE_FRONT) / 2,
+    { tileSize: 0.25, skip: ["nz"] },
+  );
+  return {
+    stripe: stripe.build(),
+    inset: inset.build(),
+    red: knobMesh("button_red", IMPACT_LIT_RADIUS, IMPACT_LIT_HEIGHT),
+    green: knobMesh("button_green", IMPACT_LIT_RADIUS, IMPACT_LIT_HEIGHT),
   };
 }
 

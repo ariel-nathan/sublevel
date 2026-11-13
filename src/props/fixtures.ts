@@ -12,6 +12,14 @@ import {
   BUTTON_EMBED,
   BUTTON_LIT_HEIGHT,
   BUTTON_LIT_RADIUS,
+  IMPACT_BEZEL_HALF,
+  IMPACT_DEPTH,
+  IMPACT_EMBED,
+  IMPACT_INSET_FRONT,
+  IMPACT_INSET_HALF,
+  IMPACT_LIT_HEIGHT,
+  IMPACT_LIT_RADIUS,
+  IMPACT_PLATE_FRONT,
 } from "./meshes";
 import { PLATE_SINK } from "./plates";
 
@@ -87,6 +95,37 @@ export function buttonParts(def: ButtonDef): FixtureBox[] {
     const positive = (f.x || f.y || f.z) > 0;
     return `${(side === "front") === positive ? "p" : "n"}${axis}`;
   };
+  if (def.mode === "impact") {
+    return [
+      {
+        owner: `${def.id} bezel`,
+        box: along(
+          def.position,
+          f,
+          -IMPACT_DEPTH - IMPACT_EMBED,
+          IMPACT_PLATE_FRONT,
+          IMPACT_BEZEL_HALF,
+        ),
+        skip: [skip("back")],
+      },
+      {
+        owner: `${def.id} inset`,
+        box: along(
+          def.position,
+          f,
+          IMPACT_PLATE_FRONT,
+          IMPACT_INSET_FRONT,
+          IMPACT_INSET_HALF,
+        ),
+        skip: [skip("back")],
+      },
+      {
+        owner: `${def.id} knob`,
+        box: along(def.position, f, -IMPACT_LIT_HEIGHT, 0, IMPACT_LIT_RADIUS),
+        skip: [skip("back")],
+      },
+    ];
+  }
   return [
     {
       owner: `${def.id} bezel`,

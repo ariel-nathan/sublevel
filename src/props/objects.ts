@@ -1,6 +1,7 @@
 import type {
   Aabb,
   ButtonDef,
+  ColliderRef,
   ContactEvent,
   DoorDef,
   DrawItem,
@@ -28,6 +29,7 @@ import { Door } from "./doors";
 import { buttonCollider } from "./fixtures";
 import {
   buildButtonMeshes,
+  buildImpactButtonMeshes,
   buildDoorMesh,
   buildPlankMesh,
   buildPlateMeshes,
@@ -46,6 +48,24 @@ export const MAX_IMPACTS_PER_STEP = 4;
 export const KILL_HEIGHT = -20;
 /** How close a hit must be to a button's face to count as aiming at it. */
 export const BUTTON_REACH = 0.3;
+/** Default countdown of a timed button (s). */
+export const TIMED_DEFAULT_SECONDS = 8;
+/**
+ * An impact button fires when one tracked prop body (at least
+ * IMPACT_BUTTON_MIN_MASS kg, never debris) hits it with a summed normal
+ * impulse of at least IMPACT_BUTTON_MIN_IMPULSE N·s in one step AND
+ * impulse / mass of at least IMPACT_BUTTON_MIN_SPEED m/s.
+ *
+ * The impulse of a body stopped by a wall is m·v·(1 + e), so impulse / mass
+ * is the speed it hit at (up to 1 + e <= 1.2). Thrown 8 kg crate at 8-11 m/s:
+ * 70-100 N·s, 9-13 m/s. Thrown 25 kg crate at 7 m/s: ~190 N·s, ~7.7 m/s.
+ * Thrown 7 kg chair at 6+ m/s: ~50 N·s, 7+ m/s. A 60 kg crate or 35 kg barrel
+ * pushed along at 1-2 m/s reaches 60-120 N·s but only 1-2.4 m/s, and a prop
+ * resting against the button gives m·g·dt (about 1-10 N·s): neither fires.
+ */
+export const IMPACT_BUTTON_MIN_IMPULSE = 25;
+export const IMPACT_BUTTON_MIN_SPEED = 4;
+export const IMPACT_BUTTON_MIN_MASS = 1;
 
 /** Updates at the start during which contacts are ignored (resting-contact noise). */
 const SETTLE_UPDATES = 3;
@@ -85,10 +105,16 @@ interface Tracked {
 
 interface ButtonUnit {
   def: ButtonDef;
+  mode: "toggle" | "timed" | "impact";
   door: Door | undefined;
-  bezel: DrawItem;
+  /** Static collider id of the unit. */
+  staticId: number;
+  /** Fixed parts: bezel, plus the stripe ring and inset for impact units. */
+  parts: DrawItem[];
   red: DrawItem;
   green: DrawItem;
+  /** Impact buttons: has been hit. */
+  triggered: boolean;
 }
 
 interface PlateUnit {
@@ -119,6 +145,7 @@ class WorldObjectsImpl implements WorldObjects {
   private readonly doorById = new Map<string, Door>();
   private readonly plates: PlateUnit[] = [];
   private readonly buttons: ButtonUnit[] = [];
+  private readonly impactByStatic = new Map<number, ButtonUnit>();
   private objectiveDone = false;
   private updates = 0;
 
@@ -232,19 +259,18 @@ class WorldObjectsImpl implements WorldObjects {
   }
 
   private buildButtons(defs: readonly ButtonDef[]): void {
-    if (defs.length === 0) {
-      return;
-    }
-    const meshes = buildButtonMeshes();
-    const [bezel, red, green] = this.register([
-      meshes.bezel,
-      meshes.red,
-      meshes.green,
-    ]);
+    let wall: { bezel: MeshHandle; red: MeshHandle; green: MeshHandle } | null =
+      null;
+    let impact: {
+      parts: MeshHandle[];
+      red: MeshHandle;
+      green: MeshHandle;
+    } | null = null;
     for (const def of defs) {
+      const mode = def.mode ?? "toggle";
       // The unit is the only geometry of a button: it also stops rays and
       // bodies, so aiming at it hits it.
-      this.physics.addStatic(buttonCollider(def));
+      const staticId = this.physics.addStatic(buttonCollider(def));
       const facing = v3.normalize(def.facing);
       const matrix = composeInto(
         mat4.identity(),
@@ -254,14 +280,64 @@ class WorldObjectsImpl implements WorldObjects {
         rotationBetween({ x: 0, y: 0, z: 1 }, facing),
         1,
       );
-      this.buttons.push({
+      let parts: DrawItem[];
+      let red: DrawItem;
+      let green: DrawItem;
+      if (mode === "impact") {
+        impact ??= this.registerImpactButton();
+        parts = impact.parts.map((mesh) => ({ mesh, transform: matrix }));
+        red = { mesh: impact.red, transform: matrix };
+        green = { mesh: impact.green, transform: matrix };
+      } else {
+        wall ??= this.registerWallButton();
+        parts = [{ mesh: wall.bezel, transform: matrix }];
+        red = { mesh: wall.red, transform: matrix };
+        green = { mesh: wall.green, transform: matrix };
+      }
+      const unit: ButtonUnit = {
         def,
+        mode,
         door: this.doorById.get(def.target),
-        bezel: { mesh: bezel, transform: matrix },
-        red: { mesh: red, transform: matrix },
-        green: { mesh: green, transform: matrix },
-      });
+        staticId,
+        parts,
+        red,
+        green,
+        triggered: false,
+      };
+      this.buttons.push(unit);
+      if (mode === "impact") {
+        this.impactByStatic.set(staticId, unit);
+      }
     }
+  }
+
+  private registerWallButton(): {
+    bezel: MeshHandle;
+    red: MeshHandle;
+    green: MeshHandle;
+  } {
+    const meshes = buildButtonMeshes();
+    const [bezel, red, green] = this.register([
+      meshes.bezel,
+      meshes.red,
+      meshes.green,
+    ]);
+    return { bezel, red, green };
+  }
+
+  private registerImpactButton(): {
+    parts: MeshHandle[];
+    red: MeshHandle;
+    green: MeshHandle;
+  } {
+    const meshes = buildImpactButtonMeshes();
+    const [stripe, inset, red, green] = this.register([
+      meshes.stripe,
+      meshes.inset,
+      meshes.red,
+      meshes.green,
+    ]);
+    return { parts: [stripe, inset], red, green };
   }
 
   // -------------------------------------------------------------------------
@@ -375,6 +451,7 @@ class WorldObjectsImpl implements WorldObjects {
   ): void {
     const impacts: { impulse: number; event: WorldEvent }[] = [];
     const breaking = new Set<Tracked>();
+    this.detectButtonImpacts(contacts, events);
     for (const contact of contacts) {
       if (contact.impulse < IMPACT_MIN_IMPULSE) {
         continue;
@@ -423,6 +500,76 @@ class WorldObjectsImpl implements WorldObjects {
     }
     for (const t of breaking) {
       this.breakCrate(t, events);
+    }
+  }
+
+  /**
+   * Fires impact buttons hit hard enough. A box face can report several
+   * contact points per step, so impulses are summed per (button, body).
+   */
+  private detectButtonImpacts(
+    contacts: ContactEvent[],
+    events: WorldEvent[],
+  ): void {
+    if (this.impactByStatic.size === 0) {
+      return;
+    }
+    let sums: Map<ButtonUnit, Map<number, number>> | null = null;
+    for (const contact of contacts) {
+      let unit: ButtonUnit | undefined;
+      let other: ColliderRef;
+      if (
+        contact.a.kind === "static" &&
+        this.impactByStatic.has(contact.a.id)
+      ) {
+        unit = this.impactByStatic.get(contact.a.id);
+        other = contact.b;
+      } else if (
+        contact.b.kind === "static" &&
+        this.impactByStatic.has(contact.b.id)
+      ) {
+        unit = this.impactByStatic.get(contact.b.id);
+        other = contact.a;
+      } else {
+        continue;
+      }
+      if (!unit || unit.triggered || other.kind !== "body") {
+        continue;
+      }
+      sums ??= new Map();
+      let perBody = sums.get(unit);
+      if (!perBody) {
+        perBody = new Map();
+        sums.set(unit, perBody);
+      }
+      perBody.set(other.id, (perBody.get(other.id) ?? 0) + contact.impulse);
+    }
+    if (!sums) {
+      return;
+    }
+    for (const [unit, perBody] of sums) {
+      for (const [bodyId, impulse] of perBody) {
+        const t = this.byId.get(bodyId);
+        const state = this.physics.getBody(bodyId);
+        if (!t || t.kind === "debris" || !state) {
+          continue;
+        }
+        if (
+          state.mass >= IMPACT_BUTTON_MIN_MASS &&
+          impulse >= IMPACT_BUTTON_MIN_IMPULSE &&
+          impulse / state.mass >= IMPACT_BUTTON_MIN_SPEED
+        ) {
+          unit.triggered = true;
+          if (unit.door) {
+            unit.door.latched = true;
+          }
+          events.push({
+            type: "button_press",
+            position: v3.clone(unit.def.position),
+          });
+          break;
+        }
+      }
     }
   }
 
@@ -478,24 +625,52 @@ class WorldObjectsImpl implements WorldObjects {
 
   private updateDoors(dt: number, events: WorldEvent[]): void {
     for (const { door } of this.doors) {
-      let wanted = door.manual;
-      if (door.plateIds.length > 0) {
+      this.tickCountdown(door, dt, events);
+      let wanted = door.latched || door.manual || door.countdown > 0;
+      if (!wanted && door.plateIds.length > 0) {
         wanted = this.plates.some(
           (u) => door.plateIds.includes(u.plate.def.id) && u.plate.pressed,
         );
       }
-      if (wanted !== door.open) {
-        door.retarget(wanted);
+      for (const change of door.step(dt, wanted)) {
         events.push({
-          type: wanted ? "door_open" : "door_close",
+          type:
+            change === "open"
+              ? "door_open"
+              : change === "close"
+                ? "door_close"
+                : "door_blocked",
           position: door.centerAt(door.travel),
         });
       }
-      door.step(dt);
       if (door.plateIds.length > 0 && !this.objectiveDone && door.fullyOpen) {
         this.objectiveDone = true;
         events.push({ type: "objective" });
       }
+    }
+  }
+
+  /**
+   * Runs a timed button's countdown and emits its ticks: once a second down
+   * to 3 s, then every half second down to 0.5 s.
+   */
+  private tickCountdown(door: Door, dt: number, events: WorldEvent[]): void {
+    if (door.countdown <= 0) {
+      return;
+    }
+    door.countdown -= dt;
+    if (door.countdown <= 1e-9) {
+      door.countdown = 0;
+      door.nextTick = 0;
+      return;
+    }
+    while (door.nextTick > 0 && door.countdown <= door.nextTick + 1e-6) {
+      events.push({
+        type: "timer_tick",
+        position: door.centerAt(door.travel),
+        remaining: door.nextTick,
+      });
+      door.nextTick = nextTickAfter(door.nextTick);
     }
   }
 
@@ -524,11 +699,28 @@ class WorldObjectsImpl implements WorldObjects {
     if (!unit || !unit.door) {
       return [];
     }
+    const door = unit.door;
     const position = v3.clone(unit.def.position);
-    if (unit.door.plateIds.length > 0) {
+    if (unit.mode === "impact" || door.latched) {
       return [{ type: "button_deny", position }];
     }
-    unit.door.manual = !unit.door.manual;
+    if (unit.mode === "timed") {
+      const seconds = unit.def.seconds ?? TIMED_DEFAULT_SECONDS;
+      door.countdown = seconds;
+      door.nextTick = nextTickAfter(seconds);
+      return [
+        { type: "button_press", position },
+        {
+          type: "timer_tick",
+          position: door.centerAt(door.travel),
+          remaining: seconds,
+        },
+      ];
+    }
+    if (door.plateIds.length > 0) {
+      return [{ type: "button_deny", position }];
+    }
+    door.manual = !door.manual;
     return [{ type: "button_press", position }];
   }
 
@@ -536,8 +728,13 @@ class WorldObjectsImpl implements WorldObjects {
     if (!hit) {
       return null;
     }
-    if (this.buttonAt(hit)) {
-      return "Press button";
+    const unit = this.buttonAt(hit);
+    if (unit) {
+      return unit.mode === "impact"
+        ? "Out of reach"
+        : unit.mode === "timed"
+          ? "Press timer"
+          : "Press button";
     }
     if (hit.collider.kind === "body") {
       const body = this.physics.getBody(hit.collider.id);
@@ -599,11 +796,22 @@ class WorldObjectsImpl implements WorldObjects {
     }
 
     for (const unit of this.buttons) {
-      out.push(unit.bezel);
-      out.push(unit.door?.open ? unit.green : unit.red);
+      for (const part of unit.parts) {
+        out.push(part);
+      }
+      const lit =
+        unit.mode === "impact" ? unit.triggered : unit.door?.open === true;
+      out.push(lit ? unit.green : unit.red);
     }
     return out;
   }
+}
+
+/** The tick due after one at `remaining` seconds (0: no more). */
+function nextTickAfter(remaining: number): number {
+  const next =
+    remaining > 3 + 1e-9 ? Math.max(3, remaining - 1) : remaining - 0.5;
+  return next < 0.5 - 1e-9 ? 0 : next;
 }
 
 const IDENTITY: Quat = { x: 0, y: 0, z: 0, w: 1 };

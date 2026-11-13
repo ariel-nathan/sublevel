@@ -1,4 +1,7 @@
-/** Pure helpers for the Web Audio wrapper: clamping, voice limiting, impulse response. */
+/**
+ * Pure helpers for the Web Audio wrapper: clamping, voice limiting with
+ * priorities, the distance model and the room impulse response.
+ */
 import { createRng } from "../core/rng";
 
 export const MAX_ONE_SHOT_VOICES = 24;
@@ -22,7 +25,9 @@ export function clampPitch(pitch: number | undefined): number {
 export interface VoiceInfo {
   id: number;
   sound: string;
+  /** Effective gain at the listener (after distance attenuation). */
   gain: number;
+  priority: number;
   start: number;
   end: number;
 }
@@ -31,17 +36,35 @@ export type VoiceDecision =
   | { play: false; reason: "rate" | "full" | "silent" }
   | { play: true; id: number; steal: number | null };
 
+/**
+ * Voice priorities: the player's own actions and interactions outrank
+ * physics debris, so a collapsing pile can never cut a footstep or a door.
+ * Loops are not voices and are never stolen.
+ */
+export const PRIORITY = { debris: 1, event: 2, player: 3 } as const;
+
 export interface VoiceLimiter {
-  /** Decides whether a one-shot may start at `now` (seconds). Registers it when allowed. */
+  /**
+   * Decides whether a one-shot may start at `now` (seconds). Registers it when
+   * allowed. A full limiter steals the weakest voice of equal or lower
+   * priority (weakest = lowest gain, weighted by how much of it is left);
+   * lower priorities are always taken first.
+   */
   request(
     sound: string,
     gain: number,
     now: number,
     duration: number,
+    priority?: number,
   ): VoiceDecision;
   /** Marks a voice as finished (e.g. from its `ended` event). */
   release(id: number): void;
   readonly active: number;
+}
+
+function strength(v: VoiceInfo, now: number): number {
+  const remaining = Math.max(0, v.end - now) / Math.max(1e-3, v.end - v.start);
+  return v.gain * (0.25 + remaining);
 }
 
 export function createVoiceLimiter(
@@ -53,7 +76,7 @@ export function createVoiceLimiter(
   let nextId = 1;
 
   return {
-    request(sound, gain, now, duration) {
+    request(sound, gain, now, duration, priority = PRIORITY.event) {
       if (gain <= 0.001) return { play: false, reason: "silent" };
       for (let i = voices.length - 1; i >= 0; i--) {
         if (voices[i]!.end <= now) voices.splice(i, 1);
@@ -64,26 +87,42 @@ export function createVoiceLimiter(
       }
       let steal: number | null = null;
       if (voices.length >= maxVoices) {
-        // Steal the quietest voice (remaining-time weighted), oldest on ties.
         let worst = -1;
-        let worstScore = Infinity;
         for (let i = 0; i < voices.length; i++) {
           const v = voices[i]!;
-          const remaining =
-            Math.max(0, v.end - now) / Math.max(1e-3, v.end - v.start);
-          const score = v.gain * (0.25 + remaining);
-          if (score < worstScore) {
-            worstScore = score;
+          if (v.priority > priority) continue;
+          if (worst < 0) {
+            worst = i;
+            continue;
+          }
+          const w = voices[worst]!;
+          if (
+            v.priority < w.priority ||
+            (v.priority === w.priority && strength(v, now) < strength(w, now))
+          ) {
             worst = i;
           }
         }
+        if (worst < 0) return { play: false, reason: "full" };
         const victim = voices[worst]!;
-        if (gain * 1.25 < worstScore) return { play: false, reason: "full" };
+        if (
+          victim.priority === priority &&
+          gain * 1.25 < strength(victim, now)
+        ) {
+          return { play: false, reason: "full" };
+        }
         steal = victim.id;
         voices.splice(worst, 1);
       }
       const id = nextId++;
-      voices.push({ id, sound, gain, start: now, end: now + duration });
+      voices.push({
+        id,
+        sound,
+        gain,
+        priority,
+        start: now,
+        end: now + duration,
+      });
       lastStart.set(sound, now);
       return { play: true, id, steal };
     },
@@ -97,37 +136,142 @@ export function createVoiceLimiter(
   };
 }
 
+// --- Distance ---------------------------------------------------------------
+
+export interface Attenuation {
+  /** Full level inside this distance (m). */
+  ref: number;
+  /** Inverse-distance rolloff factor beyond `ref`. */
+  rolloff: number;
+  /** Silent at and beyond this distance (m). */
+  max: number;
+}
+
 /**
- * Procedural "concrete room" impulse response: a short pre-delay, then noise
- * with an exponential decay (about -60 dB at `seconds`) that gets darker over
- * time. Two decorrelated channels, scaled to roughly unit energy.
+ * Distance curves. Period engines faded sounds linearly to silence at a
+ * fixed range set by the sound's attenuation class (looping ambience fading
+ * fastest); modern engines use inverse distance. This multiplies the two:
+ * natural 1/d falloff near the source and a guaranteed fade to nothing at
+ * `max`, so a hum 10 m away is faint and one 16 m away is gone.
+ */
+export const ATTENUATION = {
+  /** Impacts, doors, buttons: audible across a large room. */
+  world: { ref: 1.5, rolloff: 1, max: 32 },
+  /** Hums and machinery loops: local to their room. */
+  ambience: { ref: 1, rolloff: 1, max: 16 },
+} as const satisfies Record<string, Attenuation>;
+
+export function distanceGain(distance: number, a: Attenuation): number {
+  if (!(distance >= 0)) return 1;
+  if (distance >= a.max) return 0;
+  const beyond = Math.max(0, distance - a.ref);
+  const inverse = a.ref / (a.ref + a.rolloff * beyond);
+  const fade = 1 - beyond / (a.max - a.ref);
+  return inverse * fade;
+}
+
+/**
+ * Low-pass cutoff for a source at `distance`: full band near, falling
+ * log-linearly to 2.5 kHz at `max` (air absorption, and a stand-in for the
+ * occlusion of distant sources around corners).
+ */
+export function distanceCutoff(distance: number, a: Attenuation): number {
+  const u = Math.min(1, Math.max(0, (distance - a.ref) / (a.max - a.ref)));
+  return 20000 * Math.pow(2500 / 20000, u);
+}
+
+/**
+ * Reverb send relative to the source level at `distance`: the reverberant
+ * field falls off more slowly than the direct sound, so distant sources get
+ * wetter, not just quieter.
+ */
+export function distanceSend(distance: number, a: Attenuation): number {
+  return Math.sqrt(distanceGain(distance, a));
+}
+
+// --- Room -------------------------------------------------------------------
+
+export interface RoomResponse {
+  /** Decay time to -60 dB at low, mid and high frequencies (s). */
+  rt60Low: number;
+  rt60Mid: number;
+  rt60High: number;
+  /** Delay before the first reflection (s). */
+  preDelay: number;
+  /** Total length (s). */
+  seconds: number;
+}
+
+/**
+ * Hard concrete-and-tile rooms and corridors: about 0.85 s mid decay with
+ * the highs dying in half that (period hallway/stone presets use a
+ * high-frequency decay ratio of 0.6-0.8, dropping more for absorbent
+ * surfaces), a 9 ms pre-delay.
+ */
+export const ROOM: RoomResponse = {
+  rt60Low: 1.0,
+  rt60Mid: 0.85,
+  rt60High: 0.42,
+  preDelay: 0.009,
+  seconds: 1.1,
+};
+
+/**
+ * Procedural impulse response: a handful of discrete early reflections
+ * (8-45 ms after the pre-delay, alternating polarity, dulled), then a dense
+ * diffuse tail made of noise split into three bands, each decaying at its own
+ * rate. Dense noise has no periodic structure, so no metallic ringing. Two
+ * decorrelated channels, each scaled to unit energy.
  */
 export function makeImpulseResponse(
   sampleRate: number,
-  seconds = 0.8,
+  room: RoomResponse = ROOM,
   seed = 7,
 ): [Float32Array, Float32Array] {
-  const n = Math.max(1, Math.round(sampleRate * seconds));
-  const preDelay = Math.round(sampleRate * 0.006);
+  const n = Math.max(1, Math.round(sampleRate * room.seconds));
+  const pre = Math.round(sampleRate * room.preDelay);
   const rng = createRng(seed);
   const channels: Float32Array[] = [];
+  const k = (rt: number) => 6.91 / rt;
+  const tapShape = [0.5, 0.3, 0.15, 0.05];
   for (let c = 0; c < 2; c++) {
     const out = new Float32Array(n);
-    let lp = 0;
-    let energy = 0;
-    for (let i = preDelay; i < n; i++) {
-      const t = (i - preDelay) / sampleRate;
-      const decay = Math.exp((-6.9 * t) / seconds);
-      // One-pole lowpass whose cutoff falls from ~6 kHz to ~1.2 kHz.
-      const cutoff = 6000 * Math.exp((-1.6 * t) / seconds);
-      const a = 1 - Math.exp((-2 * Math.PI * cutoff) / sampleRate);
-      lp += a * (rng.next() * 2 - 1 - lp);
-      const fadeIn = Math.min(1, (i - preDelay) / (sampleRate * 0.002));
-      out[i] = lp * decay * fadeIn;
-      energy += out[i]! * out[i]!;
+    for (let r = 0; r < 9; r++) {
+      const t = 0.008 * (1 + r * 0.45) + rng.next() * 0.004;
+      const i = pre + Math.round(t * sampleRate);
+      const amp =
+        (r % 2 === 0 ? 1 : -1) *
+        0.55 *
+        Math.exp(-k(room.rt60Mid) * t) *
+        (0.6 + 0.4 * rng.next());
+      for (let j = 0; j < tapShape.length && i + j < n; j++) {
+        out[i + j] = out[i + j]! + amp * tapShape[j]!;
+      }
     }
-    const k = energy > 0 ? 1 / Math.sqrt(energy) : 1;
-    for (let i = 0; i < n; i++) out[i] = out[i]! * k;
+    let lp1 = 0;
+    let lp2 = 0;
+    const a1 = 1 - Math.exp((-2 * Math.PI * 500) / sampleRate);
+    const a2 = 1 - Math.exp((-2 * Math.PI * 3500) / sampleRate);
+    for (let i = pre; i < n; i++) {
+      const t = (i - pre) / sampleRate;
+      const x = rng.next() * 2 - 1;
+      lp1 += a1 * (x - lp1);
+      lp2 += a2 * (x - lp2);
+      const tail =
+        lp1 * Math.exp(-k(room.rt60Low) * t) +
+        (lp2 - lp1) * Math.exp(-k(room.rt60Mid) * t) +
+        0.7 * (x - lp2) * Math.exp(-k(room.rt60High) * t);
+      // The diffuse field builds up over the first ~25 ms.
+      out[i] = out[i]! + tail * 0.35 * Math.min(1, t / 0.025);
+    }
+    // Fade the last 5% so the tail ends without a step.
+    const fade = Math.round(n * 0.05);
+    for (let i = 0; i < fade; i++)
+      out[n - 1 - i] = out[n - 1 - i]! * (i / fade);
+    let energy = 0;
+    for (let i = 0; i < n; i++) energy += out[i]! * out[i]!;
+    const norm = energy > 0 ? 1 / Math.sqrt(energy) : 1;
+    for (let i = 0; i < n; i++) out[i] = out[i]! * norm;
     channels.push(out);
   }
   return [channels[0]!, channels[1]!];

@@ -618,5 +618,8 @@ export function defineLevel(): LevelData {
     emitters,
     ambient: v(0.07, 0.075, 0.09),
     fog: { color: v(0.07, 0.09, 0.11), near: 12, far: 40 },
+    // The exit alcove beyond door B.
+    exit: { min: v(14.2, 0, 11), max: v(15.8, 3, 13) },
+    zones: [],
   };
 }

@@ -411,6 +411,14 @@ export function createAudioSystem(): AudioSystem & AudioDebugControls {
       queuePrerender();
     },
 
+    setLoopParams() {
+      // Not implemented yet.
+    },
+
+    setRoom() {
+      // Not implemented yet.
+    },
+
     setListener(position, forward, up) {
       listener.position = position;
       listener.forward = forward;

@@ -6,6 +6,8 @@ import type {
   CharacterMoveResult,
   ColliderRef,
   ContactEvent,
+  KinematicMoveResult,
+  SlidingContact,
   PhysicsOptions,
   PhysicsWorld,
   RayHit,
@@ -227,14 +229,21 @@ export class World implements PhysicsWorld {
     return id;
   }
 
-  moveKinematic(id: number, min: Vec3): void {
+  moveKinematic(id: number, min: Vec3): KinematicMoveResult {
     const k = this.kinematics.get(id);
     if (!k) {
-      return;
+      return { blocked: false };
     }
     k.minx = min.x;
     k.miny = min.y;
     k.minz = min.z;
+    // Not implemented yet: moves are never reported as blocked.
+    return { blocked: false };
+  }
+
+  slidingContacts(): SlidingContact[] {
+    // Not implemented yet.
+    return [];
   }
 
   removeKinematic(id: number): void {
@@ -1379,6 +1388,8 @@ export class World implements PhysicsWorld {
         ? { kind: res.ground.ref.kind, id: res.ground.ref.id }
         : null,
       hitCeiling: res.hitCeiling,
+      // Not implemented yet: the ground is always reported as still.
+      groundVelocity: { x: 0, y: 0, z: 0 },
     };
   }
 }

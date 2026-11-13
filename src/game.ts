@@ -214,6 +214,10 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
         message = "Exit unlocked";
         messageTime = 4;
         break;
+      case "timer_tick":
+      case "door_blocked":
+        // Sounds for these are wired in once the audio module has them.
+        break;
       default:
         audio.play(event.type, { position: event.position });
     }

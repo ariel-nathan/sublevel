@@ -75,6 +75,8 @@ export interface PointLight {
    * `colors` (props, doors) are lit by every light.
    */
   baked: boolean;
+  /** Optional box the light is confined to; surfaces outside it are unlit. */
+  bounds?: Aabb;
 }
 
 export interface Fog {
@@ -219,6 +221,37 @@ export interface CharacterMoveResult {
   /** What the character is standing on, if anything. */
   standingOn: ColliderRef | null;
   hitCeiling: boolean;
+  /**
+   * Velocity of the surface under the character at the point of contact:
+   * zero on static ground, the body's or kinematic box's velocity otherwise.
+   * The caller adds it to its own movement to ride moving things.
+   */
+  groundVelocity: Vec3;
+}
+
+/** A dynamic body that is sliding or rolling against something this step. */
+export interface SlidingContact {
+  /** The moving dynamic body. */
+  body: number;
+  /** What it is moving against. */
+  other: ColliderRef;
+  /** World position of the contact. */
+  point: Vec3;
+  /** Speed at which the two surfaces slip past each other, m/s. */
+  slipSpeed: number;
+  /** Speed at which the body rolls over the surface without slipping, m/s. */
+  rollSpeed: number;
+  /** Force pressing the surfaces together, newtons. */
+  force: number;
+}
+
+export interface KinematicMoveResult {
+  /**
+   * True if the box could not complete the move because it would crush a
+   * dynamic body or the character against something immovable. The box is
+   * left where it was (or advanced only as far as it could go freely).
+   */
+  blocked: boolean;
 }
 
 export interface PhysicsWorld {
@@ -232,8 +265,11 @@ export interface PhysicsWorld {
    * blocks the character but is not affected by them.
    */
   addKinematic(box: Aabb): number;
-  /** Moves a kinematic box so that its minimum corner is at `min`. */
-  moveKinematic(id: number, min: Vec3): void;
+  /**
+   * Moves a kinematic box so that its minimum corner is at `min`. Reports
+   * whether the move was blocked, so a door can stop or reverse.
+   */
+  moveKinematic(id: number, min: Vec3): KinematicMoveResult;
   removeKinematic(id: number): void;
 
   addBody(desc: BodyDesc): number;
@@ -245,13 +281,19 @@ export interface PhysicsWorld {
   setBodyVelocity(id: number, linear: Vec3, angular?: Vec3): void;
   /** Teleports a body and wakes it. */
   setBodyPose(id: number, position: Vec3, orientation?: Quat): void;
-  /** Applies an impulse (NÂ·s) at a world point, or at the centre if omitted. */
+  /** Applies an impulse (N s) at a world point, or at the centre if omitted. */
   applyImpulse(id: number, impulse: Vec3, worldPoint?: Vec3): void;
 
   /** Advances the simulation. Always called with the fixed timestep. */
   step(dt: number): void;
   /** Returns and clears the contact events gathered since the last call. */
   drainContacts(): ContactEvent[];
+  /**
+   * Bodies sliding or rolling during the last step, at most one entry per
+   * body (its strongest contact), for continuous scrape and roll sounds.
+   * Resting and sleeping bodies are not listed.
+   */
+  slidingContacts(): SlidingContact[];
 
   /** Nearest hit along a ray. `direction` must be a unit vector. */
   raycast(
@@ -324,11 +366,20 @@ export interface PlayOptions {
   gain?: number;
   /** Playback rate multiplier. Default 1. */
   pitch?: number;
+  /**
+   * How much solid geometry lies between the sound and the listener, from
+   * 0 (clear line of sight, the default) to 1 (fully behind walls): the
+   * sound is made quieter and duller accordingly.
+   */
+  occlusion?: number;
 }
 
 export interface LoopHandle {
   readonly id: number;
 }
+
+/** Reverberation character of the space the listener is in. */
+export type RoomAcoustics = "small" | "lab" | "corridor" | "hall";
 
 export interface AudioSystem {
   /** Must be called from a user gesture before anything is audible. */
@@ -337,6 +388,19 @@ export interface AudioSystem {
   play(sound: SoundId, options?: PlayOptions): void;
   startLoop(sound: SoundId, options?: PlayOptions): LoopHandle;
   stopLoop(handle: LoopHandle): void;
+  /**
+   * Changes a running loop's gain, pitch, position or occlusion, gliding to
+   * the new values over `fadeSeconds` (default 0.05). Gain 0 silences the
+   * loop without stopping it. Used for sounds that follow the simulation,
+   * such as a crate scraping along the floor.
+   */
+  setLoopParams(
+    handle: LoopHandle,
+    params: PlayOptions,
+    fadeSeconds?: number,
+  ): void;
+  /** Sets the reverberation of the listener's surroundings, cross-fading. */
+  setRoom(room: RoomAcoustics): void;
   setMasterGain(gain: number): void;
 }
 
@@ -354,6 +418,12 @@ export interface LightDef {
   intensity: number;
   /** Steady lights are baked into level vertex colours; others are dynamic. */
   flicker: LightFlicker;
+  /**
+   * Optional box the light is confined to. Dynamic lights have no shadows,
+   * so without this a light shines through walls and floors into
+   * neighbouring spaces.
+   */
+  bounds?: Aabb;
 }
 
 export const PROP_KINDS = [
@@ -395,6 +465,16 @@ export interface ButtonDef {
   facing: Vec3;
   /** Id of the door it toggles. */
   target: string;
+  /**
+   * How the button works. Default "toggle".
+   * - "toggle": the use key opens the door, or closes it if open.
+   * - "timed": the use key opens the door for `seconds`, then it closes.
+   * - "impact": the use key does nothing; hitting the button with a thrown
+   *   or pushed prop opens the door for good.
+   */
+  mode?: "toggle" | "timed" | "impact";
+  /** For "timed" buttons: how long the door stays open. */
+  seconds?: number;
 }
 
 /** A floor plate that holds a door open while enough mass rests on it. */
@@ -436,6 +516,15 @@ export interface LevelData {
   emitters: SoundEmitterDef[];
   ambient: Color;
   fog: Fog;
+  /** Standing inside this box completes the demo. */
+  exit: Aabb;
+  /** Reverberation by area; outside every zone the game uses "corridor". */
+  zones: AcousticZone[];
+}
+
+export interface AcousticZone {
+  box: Aabb;
+  room: RoomAcoustics;
 }
 
 export interface BuiltLevel {
@@ -532,6 +621,10 @@ export type WorldEvent =
   | { type: "door_close"; position: Vec3 }
   | { type: "plate_down"; position: Vec3 }
   | { type: "plate_up"; position: Vec3 }
+  /** A timed door is counting down; fires about once a second while open. */
+  | { type: "timer_tick"; position: Vec3; remaining: number }
+  /** A closing door met something it cannot push aside and reopened. */
+  | { type: "door_blocked"; position: Vec3 }
   /** The exit door has been opened for the first time. */
   | { type: "objective" };
 

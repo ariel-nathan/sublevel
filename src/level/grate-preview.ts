@@ -10,7 +10,7 @@
  * To see through the grate the material's texture must have cut-out gaps.
  */
 import { launchGame } from "../../tools/browser";
-import { GRATE_THICKNESS } from "./define";
+import { GRATE_THICKNESS } from "./rooms/room";
 
 type V = [number, number, number];
 const outDir = process.argv[2] ?? "out/grate-preview";

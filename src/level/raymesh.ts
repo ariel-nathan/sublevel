@@ -136,8 +136,17 @@ export class TriangleGrid {
     return { t: dist, front: det > 0 };
   }
 
-  /** First triangle hit along the ray within maxT, or null. */
-  cast(o: readonly number[], d: readonly number[], maxT = 100): MeshHit | null {
+  /**
+   * First triangle hit along the ray within maxT, or null. Triangles whose
+   * material is in `through` (see-through materials) are passed through, as
+   * the eye does through the gaps of a cut-out texture.
+   */
+  cast(
+    o: readonly number[],
+    d: readonly number[],
+    maxT = 100,
+    through?: ReadonlySet<string>,
+  ): MeshHit | null {
     const cell = this.cell;
     const org = [this.ox, this.oy, this.oz];
     const n = [this.nx, this.ny, this.nz];
@@ -161,6 +170,7 @@ export class TriangleGrid {
       if (list) {
         let best: { t: number; front: boolean; tri: number } | null = null;
         for (const t of list) {
+          if (through?.has(this.materials[t])) continue;
           const h = this.hitTriangle(t, o, d);
           if (!h || h.t > tExit + 1e-6 || h.t < tEnter - 1e-6) continue;
           // On a tie the front face wins: two faces meeting at an edge.

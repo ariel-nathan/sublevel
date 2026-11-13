@@ -84,6 +84,23 @@ const FITTED_MATERIALS: ReadonlySet<MaterialId> = new Set([
   "monitor_screen",
 ]);
 
+/**
+ * Materials drawn with a cut-out texture (gaps the eye passes through). A
+ * brush whose material is one of these is "see-through": it is solid to
+ * physics and to walking, but for visibility it hides nothing of the other
+ * brushes and the air under or behind it counts as visible air (see
+ * `levelAir`), so whatever lies beyond it is emitted. Its own faces are
+ * emitted, top and underside alike, wherever they border visible air.
+ */
+export const SEE_THROUGH_MATERIALS: ReadonlySet<MaterialId> = new Set([
+  "metal_grate",
+]);
+
+/** True if the brush is see-through (see SEE_THROUGH_MATERIALS). */
+export function isSeeThrough(brush: Brush): boolean {
+  return SEE_THROUGH_MATERIALS.has(brush.material);
+}
+
 /** One brush face cut into cells, with the cells that must be drawn. */
 export interface FaceCells {
   brush: number;
@@ -112,6 +129,10 @@ export interface FaceCells {
  * touches it from the front, so that each cell is either wholly covered or
  * wholly uncovered: testing the cell centre is then exact. A cell is drawn if
  * it is uncovered and any voxel just in front of it is reachable air.
+ *
+ * See-through brushes cover only the faces of other see-through brushes
+ * (so two of them never both draw where they touch); the faces of a
+ * see-through brush are covered by any brush.
  */
 export function faceCells(
   brushes: readonly Brush[],
@@ -119,9 +140,13 @@ export function faceCells(
 ): FaceCells[] {
   const boxes = brushes.map(boxOf);
   const index = new BoxIndex(boxes);
+  const opaque = new BoxIndex(
+    boxes.filter((_, n) => !isSeeThrough(brushes[n])),
+  );
   const out: FaceCells[] = [];
   const pos = [0, 0, 0];
   boxes.forEach((box, n) => {
+    const covers = isSeeThrough(brushes[n]) ? index : opaque;
     for (const basis of BOX_FACES) {
       const na = axisOf(basis.normal);
       const ua = axisOf(basis.u);
@@ -167,7 +192,7 @@ export function faceCells(
           pos[ua.axis] = (us[i] + us[i + 1]) / 2;
           pos[va.axis] = (vs[j] + vs[j + 1]) / 2;
           // Covered by another brush: hidden.
-          if (index.inside(pos[0], pos[1], pos[2])) continue;
+          if (covers.inside(pos[0], pos[1], pos[2])) continue;
           // Facing only air that the player can never reach: hidden.
           setProbe(na.axis, depth0, depth1);
           setProbe(ua.axis, us[i] + FRONT, us[i + 1] - FRONT);

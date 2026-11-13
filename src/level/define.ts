@@ -44,6 +44,12 @@ export const DOOR_INSET = 0.07;
 /** How far past the far jamb an open slab ends up, inside the wall. */
 export const DOOR_OVERTRAVEL = 0.05;
 
+/** Thickness of the corridor's floor grate (top flush with the floor). */
+export const GRATE_THICKNESS = 0.045;
+
+/** Interior of the service pit under the corridor grate. */
+export const PIT = { x0: 8.4, x1: 10.3, z0: 2.6, z1: 5.4, floor: -1.1 };
+
 interface Opening {
   a: number;
   b: number;
@@ -352,8 +358,46 @@ export function defineLevel(): LevelData {
   // -------------------------------------------------------------------------
   box(4.3, -WALL, -1.25, 8.3, 0, 1.25, "concrete_floor");
   box(8.3, -WALL, -1.25, 10.8, 0, 2.5, "concrete_floor");
-  box(8.3, -WALL, 2.5, 10.8, 0, 5.5, "metal_grate");
   box(8.3, -WALL, 5.5, 10.8, 0, 7.7, "concrete_floor");
+  // Floor grate over a service pit. The grate is a thin see-through slab
+  // (GRATE_THICKNESS) flush with the floor, spanning the whole opening
+  // between the walls and the floor either side of it, so its edges abut
+  // solid brushes exactly. It rests on a steel angle along three sides, a
+  // concrete ledge under the machine on the east side, and two cross beams.
+  const gy = -GRATE_THICKNESS;
+  box(PIT.x0 - 0.1, gy, PIT.z0 - 0.1, 10.8, 0, PIT.z1 + 0.1, "metal_grate");
+  // Pit shell: walls below the corridor floor, 0.3-0.4 m thick, and a 0.2 m
+  // floor. Interior x 8.4..10.3, z 2.6..5.4, floor at y = PIT.floor.
+  const pf = PIT.floor;
+  box(8.0, pf - 0.2, 2.3, 11.1, pf, 5.7, "concrete_floor");
+  box(8.0, pf, 2.3, PIT.x0, -WALL, 5.7, "concrete_wall");
+  box(PIT.x1, pf, 2.3, 11.1, -WALL, 5.7, "concrete_wall");
+  box(PIT.x0, pf, 2.3, PIT.x1, -WALL, PIT.z0, "concrete_wall");
+  box(PIT.x0, pf, PIT.z1, PIT.x1, -WALL, 5.7, "concrete_wall");
+  // Bearing ledges under the grate: steel angle west, north and south, and
+  // a concrete ledge east (the machine stands over it).
+  box(8.3, -WALL, 2.5, PIT.x0, gy, 5.5, "metal_panel");
+  box(PIT.x0, -WALL, 2.5, PIT.x1, gy, PIT.z0, "metal_panel");
+  box(PIT.x0, -WALL, PIT.z1, PIT.x1, gy, 5.5, "metal_panel");
+  box(PIT.x1, -WALL, 2.5, 10.8, gy, 5.5, "concrete_wall");
+  // Cross beams under the grate.
+  for (const z of [3.5, 4.5]) {
+    box(PIT.x0, gy - 0.1, z - 0.04, PIT.x1, gy, z + 0.04, "metal_panel");
+  }
+  // Pipe runs along the pit at three heights: low on saddles in the middle,
+  // mid-height on the west wall, high on the east wall.
+  box(9.5, pf + 0.15, PIT.z0, 9.7, pf + 0.33, PIT.z1, "pipe");
+  for (const z of [3.2, 4.8]) {
+    box(9.48, pf, z - 0.05, 9.72, pf + 0.15, z + 0.05, "metal_panel");
+  }
+  box(PIT.x0, -0.75, PIT.z0, PIT.x0 + 0.15, -0.6, PIT.z1, "pipe");
+  box(PIT.x1 - 0.15, -0.42, PIT.z0, PIT.x1, -0.28, PIT.z1, "pipe");
+  // Junction box on the west wall, hazard band on the north wall and a dim
+  // red pilot lamp on the south wall.
+  box(PIT.x0, -0.5, 3.9, PIT.x0 + 0.12, -0.2, 4.3, "metal_panel");
+  box(8.7, -0.55, PIT.z0, 10.0, -0.43, PIT.z0 + 0.03, "hazard_stripe");
+  box(8.95, -0.88, PIT.z1 - 0.04, 9.15, -0.78, PIT.z1, "button_red");
+  // (Its light is added last: flicker phases follow the light index.)
   box(4.3, 2.8, -1.25, 10.8, 3.1, 1.25, "concrete_wall");
   box(8.3, 2.8, 1.25, 10.8, 3.1, 7.7, "concrete_wall");
   wallAlongX(4.3, 11.1, -1.55, -1.25, -WALL, 3.1, "concrete_wall");
@@ -481,6 +525,10 @@ export function defineLevel(): LevelData {
   box(14.5, 1, 12.96, 15.5, 2, 13, "sign_warning");
   fixture(14.8, 12, 3, 0.3, 0.3, "button_green");
   light(14.8, 2.55, 12, [0.35, 1.0, 0.45], 4.5, 1.6);
+
+  // The corridor pit's red pilot lamp: steady and dim, glowing up through
+  // the grate. Last in the list so that the other lights keep their index.
+  light(9.05, -0.8, 5.15, [1.0, 0.3, 0.18], 2.6, 0.8);
 
   // -------------------------------------------------------------------------
   // Storage props

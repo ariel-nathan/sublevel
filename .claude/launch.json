@@ -12,6 +12,12 @@
       "runtimeExecutable": "bun",
       "runtimeArgs": ["./demos/audio.html", "--port", "3240"],
       "port": 3240
+    },
+    {
+      "name": "sublevel-characters",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["./demos/characters.html", "--port", "3300"],
+      "port": 3300
     }
   ]
 }

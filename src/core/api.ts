@@ -417,8 +417,37 @@ export interface AudioSystem {
 
 // ---------------------------------------------------------------------------
 // Level: src/level/index.ts
-//   export function buildLevel(): BuiltLevel
+//   export function buildLevel(options?: LevelOptions): BuiltLevel
 // ---------------------------------------------------------------------------
+
+export interface LevelOptions {
+  /**
+   * Seed for a generated run. The same seed always gives the same facility.
+   * Omit it to get the hand-built level.
+   */
+  seed?: number;
+}
+
+/**
+ * One step of a known way to complete the level, in order. A generated
+ * level is solvable by construction, and these steps are how that is proved:
+ * a test bot carries them out and must reach the exit.
+ *
+ * Props are identified by their index in `LevelData.props`, buttons by id.
+ */
+export type SolutionStep =
+  /** Walk in a straight line to a point on the floor. */
+  | { do: "walk"; to: Vec3 }
+  /** Go to a wall button within reach and press it with the use key. */
+  | { do: "press"; button: string }
+  /** Pick up a prop and set it down so that it rests at `to`. */
+  | { do: "carry"; prop: number; to: Vec3 }
+  /** Push a prop that is too heavy to carry until it rests near `to`. */
+  | { do: "push"; prop: number; to: Vec3 }
+  /** Pick up a prop and throw it so that it hits the point `at`. */
+  | { do: "throw"; prop: number; at: Vec3 }
+  /** Wait until a world event of this type happens, at most `seconds`. */
+  | { do: "wait"; for: WorldEvent["type"]; seconds: number };
 
 export type LightFlicker = "none" | "fluorescent" | "broken";
 
@@ -531,6 +560,10 @@ export interface LevelData {
   exit: Aabb;
   /** Reverberation by area; outside every zone the game uses "corridor". */
   zones: AcousticZone[];
+  /** The seed this level was generated from, or null if hand-built. */
+  seed: number | null;
+  /** A known way to reach the exit, for automated play. May be empty. */
+  solution: SolutionStep[];
 }
 
 export interface AcousticZone {

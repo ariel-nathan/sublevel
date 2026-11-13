@@ -676,5 +676,7 @@ export function defineLevel(): LevelData {
     fog: { color: v(0.07, 0.09, 0.11), near: 12, far: 40 },
     exit: hall.exit,
     zones,
+    seed: null,
+    solution: [],
   };
 }

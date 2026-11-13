@@ -1,4 +1,11 @@
-import type { Aabb, Brush, BuiltLevel, DoorDef, LevelData } from "../core/api";
+import type {
+  Aabb,
+  Brush,
+  BuiltLevel,
+  DoorDef,
+  LevelData,
+  LevelOptions,
+} from "../core/api";
 import { AirGrid } from "./airgrid";
 import { LightBaker } from "./bake";
 import { defineLevel } from "./define";
@@ -37,7 +44,9 @@ export function levelAir(data: LevelData): AirGrid {
 }
 
 /** Builds the level data, its baked meshes and one collider per brush. */
-export function buildLevel(): BuiltLevel {
+export function buildLevel(_options: LevelOptions = {}): BuiltLevel {
+  // Generated runs are not implemented yet: every seed gives the hand-built
+  // level.
   const data = defineLevel();
   const boxes = data.brushes.map(boxOf);
   const air = levelAir(data);

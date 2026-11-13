@@ -9,7 +9,11 @@ import {
   type Placement,
 } from "./assemble";
 import { KESTREL_ANNEX } from "./define";
+import { ADAPTER, type AdapterParams } from "./gen/modules/adapter";
 import { boxesOverlap, boxOf, type Box } from "./geometry";
+
+const clamp = (v: number, [lo, hi]: readonly [number, number]) =>
+  Math.min(hi, Math.max(lo, v));
 import { CORRIDOR, type CorridorParams } from "./rooms/corridor";
 import { LAB } from "./rooms/lab";
 import { EXIT_LOCK, PENDING_MODULES } from "./rooms/puzzles";
@@ -136,21 +140,45 @@ export function assembleRoomsLevel(
       const cplan = planRoom(CORRIDOR, exit, { params: corridor });
       const cboxes = cplan.footprint.map(boxOf);
       if (!fits(cboxes)) continue;
-      const at = cplan.exits[0].connector;
+      let at = cplan.exits[0].connector;
+      // A doorway adapter if the module takes another doorway size or has
+      // an open entry (the authored set pieces), as in generated runs.
+      const size = {
+        width: clamp(at.width, module.entrySize.width),
+        height: clamp(at.height, module.entrySize.height),
+      };
+      const probe = planRoom(
+        module,
+        { ...at, ...size },
+        { params, mirror, seed: roomSeed },
+      );
+      const open = probe.entry !== null && !probe.entry.end.wall;
+      let adapter: Placement | null = null;
+      let aboxes: Box[] = [];
+      if (open || size.width !== at.width || size.height !== at.height) {
+        const aparams: AdapterParams = {
+          length: 2.4,
+          exitWidth: size.width,
+          exitHeight: size.height,
+          cover: open ? probe.entry!.end.extent : null,
+        };
+        const aplan = planRoom(ADAPTER, at, { params: aparams });
+        aboxes = aplan.footprint.map(boxOf);
+        if (!fits(aboxes)) continue;
+        adapter = place(ADAPTER, { name: `a${slot}`, params: aparams });
+        at = aplan.exits[0].connector;
+      }
       const plan = planRoom(module, at, { params, mirror, seed: roomSeed });
       const boxes = plan.footprint.map(boxOf);
-      if (boxes.some((a) => cboxes.some((b) => boxesOverlap(a, b, 1e-6)))) {
+      const near = [...cboxes, ...aboxes];
+      if (boxes.some((a) => near.some((b) => boxesOverlap(a, b, 1e-6)))) {
         continue;
       }
       if (!fits(boxes)) continue;
-      placements.push(place(CORRIDOR, { name: `c${slot}`, params: corridor }), {
-        module,
-        name,
-        params,
-        mirror,
-        seed: roomSeed,
-      });
-      taken.push(...cboxes, ...boxes);
+      placements.push(place(CORRIDOR, { name: `c${slot}`, params: corridor }));
+      if (adapter) placements.push(adapter);
+      placements.push({ module, name, params, mirror, seed: roomSeed });
+      taken.push(...cboxes, ...aboxes, ...boxes);
       if (plan.exits.length > 0) exit = plan.exits[0].connector;
       return;
     }

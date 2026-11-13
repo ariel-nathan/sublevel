@@ -247,15 +247,72 @@ export class Solver {
     const feet = (await this.pilot.state()).player.feet;
     if (!(await this.doorsClear(feet, to))) return false;
     if (to.y !== undefined && to.y < feet.y - 0.25) {
-      // A drop off a ledge: walk off, land, then finish the walk.
-      await this.pilot.walkTo(to.x, to.z, { direct: true, tolerance: 0.4 });
-      await this.pilot.wait(45);
+      await this.dropOff(feet, to);
     }
     const result = await this.pilot.walkTo(to.x, to.z, {
       direct: true,
       tolerance: 0.15,
     });
     return result.arrived;
+  }
+
+  /**
+   * Steps down off a ledge on the way from `feet` to `to`: walks to just
+   * before the edge (the last point with solid ground at the feet's height
+   * on the way), then creeps over it and lets go of the keys until landed,
+   * so that the run's momentum does not carry the player far past it.
+   */
+  private async dropOff(
+    feet: Point3,
+    to: { x: number; z: number },
+  ): Promise<void> {
+    const length = horizontalDistance(feet, to);
+    const ux = (to.x - feet.x) / length;
+    const uz = (to.z - feet.z) / length;
+    const supported = (x: number, z: number) =>
+      this.solids.some(
+        (b) =>
+          Math.abs(b.y1 - feet.y) < 0.06 &&
+          x >= b.x0 &&
+          x <= b.x1 &&
+          z >= b.z0 &&
+          z <= b.z1,
+      );
+    let edge = 0;
+    while (
+      edge + 0.05 <= length &&
+      supported(feet.x + ux * (edge + 0.05), feet.z + uz * (edge + 0.05))
+    )
+      edge += 0.05;
+    const stop = Math.max(0, edge - 0.25);
+    if (stop > 0.1) {
+      await this.pilot.walkTo(feet.x + ux * stop, feet.z + uz * stop, {
+        direct: true,
+        tolerance: 0.1,
+      });
+    }
+    const yaw = (Math.atan2(-ux, -uz) * 180) / Math.PI;
+    const pitch = (await this.pilot.state()).player.pitchDeg;
+    await this.pilot.look(yaw, pitch, true);
+    // Creep until airborne (the feet leave the edge once the body's centre
+    // is about its radius past it), then let go and land.
+    let airborne = false;
+    for (let i = 0; i < 90 && !airborne; i++) {
+      await this.session.evaluate(`__harness.step(1, {"moveZ":0.6})`);
+      airborne = !(await this.pilot.state()).player.onGround;
+    }
+    // Brake in the air (as much as air control allows), then fall.
+    for (let i = 0; i < 120; i++) {
+      await this.session.evaluate(
+        `__harness.step(1, {"moveZ":${i < 8 ? -1 : 0}})`,
+      );
+      if ((await this.pilot.state()).player.onGround) break;
+    }
+    await this.pilot.wait(15);
+    const now = (await this.pilot.state()).player.feet;
+    this.pilot.log(
+      `dropped off the edge${airborne ? "" : " (never airborne)"} to (${f(now.x)}, ${f(now.y)}, ${f(now.z)})`,
+    );
   }
 
   /**

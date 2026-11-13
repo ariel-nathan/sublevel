@@ -322,6 +322,28 @@ describe("development levels", () => {
     );
   });
 
+  test("the authored set pieces join through a doorway adapter, sealed and solvable", () => {
+    for (const name of ["storage", "filtration-hall", "valve-chamber@mirror"]) {
+      const data = buildRoomsLevel([name], 1);
+      expect([name, checkGeometry(data)]).toEqual([name, []]);
+      const problems = verifySolution(
+        data.solution,
+        data.playerSpawn.position,
+        {
+          solids: data.brushes.map((b) => {
+            const box = boxOf(b);
+            return isSkirting(b) ? { ...box, y1: SKIRTING_COLLIDER_TOP } : box;
+          }),
+          floors: data.brushes.map(boxOf),
+          props: data.props,
+          buttons: data.buttons,
+          plates: data.plates.map((p) => boxOf(p.box)),
+        },
+      );
+      expect([name, problems]).toEqual([name, []]);
+    }
+  });
+
   test("a chain of eight puzzle rooms assembles, sealed, for several seeds", () => {
     const names = PUZZLE_MODULES.map((m) => m.name);
     for (const seed of [1, 2, 3, 4]) {

@@ -87,4 +87,8 @@ A replay saved with F8 records every input of a session and can be played back e
 
 ## Status
 
-A demo: a few rooms and two puzzles. The sounds were designed without being heard by their author and tuned from a small amount of listening, so the audio is the least finished part.
+A demo: a handful of rooms and three puzzles. The sounds were designed without being heard by their author and tuned from a small amount of listening, so the audio is the least finished part.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

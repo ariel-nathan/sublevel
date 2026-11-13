@@ -68,12 +68,43 @@ export const VIEWS: readonly Viewpoint[] = [
   view("storage-ceiling", [9.5, 1.65, 12], 180, 55),
   view("storage-barrels", [9.5, 1.5, 12], -135, -13),
   view("storage-north-doorway", [9.5, 1.65, 12], -20, -5),
-  // Door B open and the exit alcove
+  // Filtration hall, door B closed (the camera is placed, not walked)
+  view("hall-from-door-b", [14.6, 1.65, 12.3], -85, 2),
+  view("hall-overview", [14.6, 3.6, 11.5], -112, -20),
+  view("hall-timed-button", [23.9, 1.5, 13], -90, -5),
+  view("hall-button-to-door-t", [23.8, 1.65, 13], -25, -4),
+  view("hall-screen-slot", [22, 1.9, 12.3], -30, 0),
+  view("hall-lane", [15, 1.65, 9.6], -90, 0),
+  view("hall-lane-door-t-closed", [22.5, 1.65, 9.8], -90, -3),
+  view("hall-lane-floor", [16, 1.9, 9], -120, -25),
+  view("hall-vessels", [20.5, 1.65, 11.8], 150, 0),
+  view("hall-pump-corner", [21, 1.65, 12.5], -130, -5),
+  view("hall-back-to-door-b", [22, 1.65, 12.5], 90, 0),
+  view("hall-ceiling", [19.5, 1.65, 12], -90, 60),
+  view("hall-sw-corner-floor", [17.5, 1.9, 12.5], 135, -25),
+  // Valve chamber and egress lock, their doors closed
+  view("chamber-exit-door-closed", [28.5, 1.65, 9.8], -90, 0),
+  view("chamber-target-closeup", [29.9, 3.5, 9.8], -90, 25),
+  view("chamber-door-t-inside", [28, 1.65, 10.4], 90, -3),
+  view("chamber-manifold", [28.5, 1.65, 10.5], 30, -8),
+  view("chamber-console", [28.5, 1.65, 10], 140, -8),
+  view("chamber-ceiling", [28.5, 1.65, 9.8], -90, 65),
+  view("lock-closed", [33.6, 1.6, 9.8], 90, 0),
+  // Every door open: door B by the plate, door T wedged by a small crate,
+  // the exit door by a crate thrown at its target
   view("storage-door-b-open", [10.5, 1.65, 12], -90, 0, "open"),
-  view("alcove-from-door", [12.5, 1.65, 12], -90, 0, "open"),
-  view("alcove-screen", [14.3, 1.6, 12], -90, 0, "open"),
-  view("alcove-corner", [14.2, 1.6, 11.4], -150, -10, "open"),
-  view("alcove-back-to-storage", [15.4, 1.6, 12], 90, 0, "open"),
+  view("hall-through-door-b", [12.5, 1.65, 12], -90, 0, "open"),
+  view("hall-back-to-storage", [15.4, 1.6, 12], 90, 0, "open"),
+  view("hall-door-t-wedged", [22.8, 1.65, 9.9], -90, -4, "open"),
+  view("hall-wedge-through-slot", [24.3, 1.75, 12], -25, -15, "open"),
+  view("hall-button-to-door-t-open", [23.8, 1.65, 13], -25, -4, "open"),
+  view("chamber-from-door-t", [26, 1.65, 9.8], -90, 8, "open"),
+  view("chamber-target-from-floor", [28, 1.65, 9.8], -90, 32, "open"),
+  view("chamber-back-to-hall", [30.5, 1.65, 9.8], 90, 0, "open"),
+  view("lock-from-chamber", [30, 1.65, 9.8], -90, 0, "open"),
+  view("lock-screen", [32.3, 1.6, 9.8], -90, 0, "open"),
+  view("lock-corner", [32.2, 1.6, 8.7], -150, -10, "open"),
+  view("lock-back-to-chamber", [34.3, 1.6, 9.8], 90, 0, "open"),
 ];
 
 /** Filters views by case-insensitive substring of the name. */
@@ -89,9 +120,41 @@ export function selectViews(
 }
 
 /**
+ * In-page script that opens the doors beyond door B and leaves the timed
+ * door wedged: presses the timed button (as the use key would), throws a
+ * chamber crate at the exit door's impact target, and once the timed door
+ * is open puts the lane's small crate in its doorway. Steps 100 steps,
+ * well inside the timed button's countdown, so the timed door is still
+ * open when the steps end. Shared with src/level/coverage.ts.
+ */
+export const OPEN_FAR_DOORS_SCRIPT = `(() => {
+  const g = window.__game;
+  const d = g.level.data;
+  const timed = d.buttons.find((b) => b.mode === "timed");
+  const target = d.buttons.find((b) => b.mode === "impact");
+  const door = d.doors.find((x) => x.id === timed.target);
+  g.world.use({ collider: { kind: "static", id: 0 }, point: timed.position,
+    normal: timed.facing, distance: 1 });
+  const smalls = g.physics.bodies().filter((b) => b.tag === "crate_wood_small");
+  const thrown = smalls.find((b) => b.position.x > door.closed.max.x &&
+    b.position.x < target.position.x);
+  const f = target.facing;
+  g.physics.setBodyPose(thrown.id, { x: target.position.x + f.x * 0.4,
+    y: target.position.y, z: target.position.z + f.z * 0.4 });
+  g.physics.setBodyVelocity(thrown.id, { x: -f.x * 8, y: 0, z: -f.z * 8 });
+  __harness.step(80);
+  const wedge = smalls.find((b) => b.position.x < door.closed.min.x &&
+    b.position.z < door.closed.min.z);
+  g.physics.setBodyPose(wedge.id, { x: (door.closed.min.x + door.closed.max.x) / 2 - 0.12,
+    y: 0.26, z: door.closed.max.z - 0.5 });
+  __harness.step(20);
+})()`;
+
+/**
  * Brings the game to the "doors open" state: door A via its lab button (the
- * way a player does it) and door B by teleporting the metal crate onto the
- * pressure plate. Idempotent only on a fresh game.
+ * way a player does it), door B by teleporting the metal crate onto the
+ * pressure plate, then the doors beyond (OPEN_FAR_DOORS_SCRIPT). Idempotent
+ * only on a fresh game.
  */
 export async function openDoors(pilot: Pilot): Promise<void> {
   const pressed = await pilot.pressButtonAt(3.91, 1.2, 1.2, { x: -2, z: 1.2 });
@@ -106,11 +169,14 @@ export async function openDoors(pilot: Pilot): Promise<void> {
     `__game.physics.setBodyPose(${crates[0].id}, { x: 8.5, y: 0.4, z: 12 })`,
   );
   await pilot.wait(200);
+  await pilot.session.evaluate(OPEN_FAR_DOORS_SCRIPT);
+  await pilot.wait(1);
   const events = await pilot.events();
   const opened = events.filter((e) => e.type === "door_open").length;
-  if (opened < 2) {
+  const closed = events.filter((e) => e.type === "door_close").length;
+  if (opened < 4 || closed > 0) {
     throw new Error(
-      `expected both doors to open, saw ${opened} door_open events`,
+      `expected all four doors to open, saw ${opened} door_open and ${closed} door_close events`,
     );
   }
 }

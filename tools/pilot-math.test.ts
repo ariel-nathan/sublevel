@@ -7,6 +7,7 @@ import {
   lookToward,
   routeBetween,
   standPoint,
+  throwPitch,
   viewBasis,
   wrapDeg,
   zoneOf,
@@ -107,6 +108,36 @@ describe("walking helpers", () => {
   });
 });
 
+describe("throwPitch", () => {
+  const flight = (deg: number, distance: number, speed: number, up: number) => {
+    const a = (deg * Math.PI) / 180;
+    const vx = speed * Math.cos(a);
+    const vy = speed * Math.sin(a) + up;
+    const t = distance / vx;
+    return vy * t - (9.81 * t * t) / 2;
+  };
+
+  test("the arc passes through the target", () => {
+    for (const [d, h] of [
+      [3, 2.5],
+      [4, 0],
+      [6, -1],
+      [2, 0.5],
+    ]) {
+      const p = throwPitch(d, h, 11, 1);
+      expect(p).not.toBeNull();
+      expect(flight(p!, d, 11, 1)).toBeCloseTo(h, 4);
+    }
+  });
+
+  test("the flatter arc is chosen, and out-of-range targets give null", () => {
+    const p = throwPitch(4, 1, 11, 1)!;
+    expect(p).toBeLessThan(45);
+    expect(throwPitch(30, 0, 5, 0)).toBeNull();
+    expect(throwPitch(2, 20, 11, 1)).toBeNull();
+  });
+});
+
 describe("routes", () => {
   test("zones follow the rooms", () => {
     expect(zoneOf({ x: -2, z: 1.6 })).toBe(0);
@@ -115,7 +146,39 @@ describe("routes", () => {
     expect(zoneOf({ x: 9.5, z: 0 })).toBe(3);
     expect(zoneOf({ x: 9.5, z: 4 })).toBe(4);
     expect(zoneOf({ x: 9.5, z: 12 })).toBe(5);
-    expect(zoneOf({ x: 15, z: 12 })).toBe(5);
+    expect(zoneOf({ x: 13, z: 12 })).toBe(5);
+    expect(zoneOf({ x: 15, z: 12 })).toBe(6);
+    expect(zoneOf({ x: 20, z: 9.5 })).toBe(7);
+    expect(zoneOf({ x: 28, z: 10 })).toBe(8);
+    expect(zoneOf({ x: 33, z: 10 })).toBe(9);
+  });
+
+  test("into the lane goes round the end of the screen, and back the same way", () => {
+    const route = routeBetween({ x: 23.8, z: 13 }, { x: 28, z: 10 });
+    expect(route.map((w) => w.name)).toEqual([
+      "screen_end",
+      "lane",
+      "door_t_approach",
+      "chamber",
+    ]);
+    const back = routeBetween({ x: 28, z: 10 }, { x: 23.8, z: 13 });
+    expect(back.map((w) => w.name)).toEqual([
+      "chamber",
+      "door_t_approach",
+      "lane",
+      "screen_end",
+    ]);
+    const storage = routeBetween({ x: 9, z: 12 }, { x: 33, z: 10 });
+    expect(storage.map((w) => w.name)).toEqual([
+      "door_b_approach",
+      "hall",
+      "screen_end",
+      "lane",
+      "door_t_approach",
+      "chamber",
+      "exit_door_approach",
+      "lock",
+    ]);
   });
 
   test("lab to storage goes through the door, corridor and bend", () => {

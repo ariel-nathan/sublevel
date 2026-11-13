@@ -28,6 +28,8 @@ interface BakedLight {
   blockers: Box[];
   /** See-through brushes that can possibly dim them. */
   filters: Box[];
+  /** Index of the blocker that stopped the latest blocked ray. */
+  lastBlocker: number;
 }
 
 /** Bakes steady lights into per-vertex colours. */
@@ -69,6 +71,7 @@ export class LightBaker {
         def,
         blockers: shrunk.filter((b, i) => !seeThrough[i] && near(b)),
         filters: shrunk.filter((b, i) => seeThrough[i] === true && near(b)),
+        lastBlocker: 0,
       });
     }
   }
@@ -86,11 +89,35 @@ export class LightBaker {
       const dx = lp.x + j[0] - ox;
       const dy = lp.y + j[1] - oy;
       const dz = lp.z + j[2] - oz;
-      let blocked = false;
-      for (const b of light.blockers) {
+      // Neighbouring samples are mostly shadowed by the same brush, so the
+      // last blocker found is tried first (the answer does not depend on
+      // the order).
+      const blockers = light.blockers;
+      let blocked =
+        light.lastBlocker < blockers.length &&
+        segmentHitsBox(ox, oy, oz, dx, dy, dz, 1, blockers[light.lastBlocker]);
+      // Boxes clear of the segment's bounds cannot block it.
+      const x0 = Math.min(ox, ox + dx);
+      const x1 = Math.max(ox, ox + dx);
+      const y0 = Math.min(oy, oy + dy);
+      const y1 = Math.max(oy, oy + dy);
+      const z0 = Math.min(oz, oz + dz);
+      const z1 = Math.max(oz, oz + dz);
+      for (let i = 0; !blocked && i < blockers.length; i++) {
+        const b = blockers[i];
+        if (
+          b.x0 > x1 ||
+          b.x1 < x0 ||
+          b.y0 > y1 ||
+          b.y1 < y0 ||
+          b.z0 > z1 ||
+          b.z1 < z0
+        ) {
+          continue;
+        }
         if (segmentHitsBox(ox, oy, oz, dx, dy, dz, 1, b)) {
           blocked = true;
-          break;
+          light.lastBlocker = i;
         }
       }
       if (blocked) continue;

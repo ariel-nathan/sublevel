@@ -45,10 +45,10 @@ both("buttonLab-side", [3.75, 1.25, 1.65], [3.95, 1.2, 1.2]);
 both("buttonLab-above", [3.7, 1.5, 1.2], [3.95, 1.2, 1.2]);
 both("buttonCorr", [5.0, 1.3, -1.08], [4.3, 1.2, -1.08]);
 both("buttonCorr-side", [4.55, 1.25, -0.6], [4.35, 1.2, -1.08]);
-// Door B, storage side and alcove side.
+// Door B, storage side and hall side.
 both("doorB-storage", [11.0, 1.4, 12.3], [13.5, 1.2, 12]);
 both("doorB-storage-graze", [12.9, 1.2, 13.4], [13.5, 1.1, 10.4]);
-both("doorB-alcove", [15.4, 1.4, 12.4], [13.8, 1.2, 12]);
+both("doorB-hall", [15.6, 1.4, 12.4], [14.1, 1.2, 12]);
 both("doorB-inside", [13.65, 1.2, 12.3], [13.65, 1.2, 11.0]);
 // Plate (raised in "closed", pressed in "open").
 both("plate", [8.5, 1.2, 10.4], [8.5, 0, 12]);
@@ -76,8 +76,14 @@ both("storage-shelves", [7.5, 1.4, 10.0], [5.5, 1.0, 10.0]);
 both("storage-ceiling", [9, 2.0, 12], [9, 4, 10.5]);
 both("storage-east", [11.5, 1.6, 12], [13.5, 1.6, 10.3]);
 both("storage-north", [12.0, 1.6, 10.0], [12.3, 1.8, 8]);
-both("alcove", [14.3, 1.6, 12.0], [15.8, 1.5, 12.0]);
-both("alcove-ceiling", [14.3, 1.6, 12.0], [14.8, 3, 12.0]);
+both("hall-screen-slot", [23.5, 1.9, 12.0], [24.6, 1.9, 10.95]);
+both("hall-door-t", [22.5, 1.5, 9.9], [25.1, 1.2, 9.9]);
+both("hall-timed-button", [24.0, 1.4, 12.6], [25.02, 1.2, 13.0]);
+both("hall-channel", [19.0, 1.6, 13.4], [19.0, 0, 14.9]);
+both("chamber-target", [29.0, 2.0, 9.8], [31.4, 4.2, 9.8]);
+both("exit-door", [29.5, 1.5, 10.4], [31.4, 1.2, 9.8]);
+both("lock", [32.2, 1.6, 9.8], [34.7, 1.5, 9.8]);
+both("lock-ceiling", [32.2, 1.6, 9.8], [32.9, 3, 9.8]);
 
 function pose(from: V, at: V, dx = 0) {
   const d = [at[0] - from[0], at[1] - from[1], at[2] - from[2]];

@@ -3,7 +3,7 @@ import { AirGrid } from "./airgrid";
 import { LightBaker } from "./bake";
 import { defineLevel } from "./define";
 import { boxOf, type Box } from "./geometry";
-import { generateMeshes } from "./meshgen";
+import { generateMeshes, isSeeThrough } from "./meshgen";
 
 /** How far a door volume reaches either side of the slab, across its wall. */
 export const DOOR_VOLUME_REACH = 0.25;
@@ -21,11 +21,15 @@ export function doorVolume(door: DoorDef): Box {
     : { ...b, z0: b.z0 - DOOR_VOLUME_REACH, z1: b.z1 + DOOR_VOLUME_REACH };
 }
 
-/** Air connected to the spawn, with every door open (door volumes as air). */
+/**
+ * Air visible from the spawn: every door open (door volumes as air), and
+ * see-through brushes as air, so that the space beneath a floor grate counts
+ * as visible even though no one can stand in it.
+ */
 export function levelAir(data: LevelData): AirGrid {
   const spawn = data.playerSpawn.position;
   return new AirGrid(
-    data.brushes.map(boxOf),
+    data.brushes.filter((b) => !isSeeThrough(b)).map(boxOf),
     { x: spawn.x, y: spawn.y + 1, z: spawn.z },
     0.1,
     data.doors.map(doorVolume),
@@ -37,7 +41,12 @@ export function buildLevel(): BuiltLevel {
   const data = defineLevel();
   const boxes = data.brushes.map(boxOf);
   const air = levelAir(data);
-  const baker = new LightBaker(boxes, data.lights, data.ambient);
+  const baker = new LightBaker(
+    boxes,
+    data.lights,
+    data.ambient,
+    data.brushes.map(isSeeThrough),
+  );
   const meshes = generateMeshes(data.brushes, air, baker);
   const colliders: Aabb[] = data.brushes.map((b) => ({
     min: { ...b.min },

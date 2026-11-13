@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { v3 } from "../math";
 import { SOUND_IDS } from "../core/api";
-import { MATERIAL_IDS } from "../core/materials";
+import { MATERIAL_IDS, MATERIALS } from "../core/materials";
 import { PLAYER, PROP_SPECS } from "../core/props";
 import { AirGrid } from "./airgrid";
+import { LightBaker, SEE_THROUGH_OPACITY } from "./bake";
 import { coplanarOverlaps, describeOverlap, levelRects } from "./coplanar";
-import { BUTTON_DEPTH, DOOR_INSET } from "./define";
+import { BUTTON_DEPTH, DOOR_INSET, GRATE_THICKNESS, PIT } from "./define";
 import {
   boxesOverlap,
   boxOf,
@@ -22,7 +23,12 @@ import {
   levelAir,
   SKIRTING_COLLIDER_TOP,
 } from "./index";
-import { faceCells } from "./meshgen";
+import {
+  faceCells,
+  forEachVisibleCell,
+  isSeeThrough,
+  SEE_THROUGH_MATERIALS,
+} from "./meshgen";
 import { TriangleGrid } from "./raymesh";
 
 const start = performance.now();
@@ -511,6 +517,7 @@ describe("walkability", () => {
     ["door A", 4.15, 0],
     ["corridor start", 5.5, 0],
     ["corridor bend", 9.5, 0],
+    ["corridor grate", 9.5, 4],
     ["corridor end", 9.5, 7],
     ["storage entry", 9.5, 9],
     ["pressure plate", 8.5, 12],
@@ -816,5 +823,307 @@ describe("visible geometry", () => {
     expect(cast).toBeGreaterThan(90000);
     expect(failures.slice(0, 20)).toEqual([]);
     expect(failures.length).toBe(0);
+  });
+});
+
+describe("corridor grate and pit", () => {
+  const GRATE = data.brushes.findIndex(
+    (b) => b.material === "metal_grate" && b.max.x <= 11 && b.max.z <= 8,
+  );
+  const slab = brushes[GRATE];
+  const air = levelAir(data);
+  const faces = faceCells(data.brushes, air);
+  const opaqueBoxes = brushes.filter((_, i) => !isSeeThrough(data.brushes[i]));
+  const opaqueIndex = new BoxIndex(opaqueBoxes);
+  const grid = new TriangleGrid(meshes);
+  const fmt = (p: readonly number[]) =>
+    `(${p.map((q) => q.toFixed(2)).join(", ")})`;
+  const clear = (x: number, y: number, z: number): boolean =>
+    air.reachable(x, y, z) &&
+    brushIndex.overlapping({
+      x0: x - 0.04,
+      x1: x + 0.04,
+      y0: y - 0.04,
+      y1: y + 0.04,
+      z0: z - 0.04,
+      z1: z + 0.04,
+    }).length === 0;
+
+  test("the grate is a thin see-through slab flush with the floor over the pit", () => {
+    expect(GRATE).toBeGreaterThanOrEqual(0);
+    expect(SEE_THROUGH_MATERIALS.has("metal_grate")).toBe(true);
+    expect(isSeeThrough(data.brushes[GRATE])).toBe(true);
+    expect(slab.y1).toBe(0);
+    expect(slab.y1 - slab.y0).toBeCloseTo(GRATE_THICKNESS, 9);
+    expect(GRATE_THICKNESS).toBeGreaterThanOrEqual(0.04);
+    expect(GRATE_THICKNESS).toBeLessThanOrEqual(0.05);
+    // It covers the whole pit opening.
+    expect(slab.x0).toBeLessThanOrEqual(PIT.x0);
+    expect(slab.x1).toBeGreaterThanOrEqual(PIT.x1);
+    expect(slab.z0).toBeLessThanOrEqual(PIT.z0);
+    expect(slab.z1).toBeGreaterThanOrEqual(PIT.z1);
+    // The pit is 0.9 to 1.2 m deep and open under the grate.
+    expect(-PIT.floor).toBeGreaterThanOrEqual(0.9);
+    expect(-PIT.floor).toBeLessThanOrEqual(1.2);
+    const cx = (PIT.x0 + PIT.x1) / 2;
+    const cz = (PIT.z0 + PIT.z1) / 2;
+    expect(brushIndex.insideStrict(cx, PIT.floor + 0.05, 4.0)).toBe(false);
+    // The pit and the grate itself are visible air, and the pit is sealed:
+    // the visible air never reaches the outside, doors open or closed.
+    expect(air.reachable(cx, -0.6, cz)).toBe(true);
+    expect(air.reachable(cx, -0.02, cz)).toBe(true);
+    expect(air.leaks).toBe(false);
+    const spawn = data.playerSpawn.position;
+    const closed = new AirGrid(
+      [...opaqueBoxes, ...doorBoxes],
+      { x: spawn.x, y: spawn.y + 1, z: spawn.z },
+      0.1,
+    );
+    expect(closed.leaks).toBe(false);
+  });
+
+  test("no gap wider than 1 cm around the slab, and it rests on supports", () => {
+    const band = 0.01;
+    const sides: Box[] = [
+      { ...slab, x0: slab.x0 - band, x1: slab.x0 },
+      { ...slab, x0: slab.x1, x1: slab.x1 + band },
+      { ...slab, z0: slab.z0 - band, z1: slab.z0 },
+      { ...slab, z0: slab.z1, z1: slab.z1 + band },
+    ];
+    for (const s of sides) {
+      expect([
+        fmt([s.x0, s.y0, s.z0]),
+        regionCovered(opaqueIndex, opaqueBoxes, s),
+      ]).toEqual([fmt([s.x0, s.y0, s.z0]), true]);
+    }
+    // A ledge directly under every edge (5 cm wide, 1 cm deep).
+    const under: Box[] = [
+      { ...slab, y0: slab.y0 - band, y1: slab.y0, x1: slab.x0 + 0.05 },
+      { ...slab, y0: slab.y0 - band, y1: slab.y0, x0: slab.x1 - 0.05 },
+      { ...slab, y0: slab.y0 - band, y1: slab.y0, z1: slab.z0 + 0.05 },
+      { ...slab, y0: slab.y0 - band, y1: slab.y0, z0: slab.z1 - 0.05 },
+    ];
+    for (const s of under) {
+      expect(regionCovered(opaqueIndex, opaqueBoxes, s)).toBe(true);
+    }
+    // No brush overlaps the slab.
+    brushes.forEach((b, i) => {
+      if (i !== GRATE) expect(boxesOverlap(b, slab, 1e-6)).toBe(false);
+    });
+  });
+
+  test("the slab is drawn on top and underneath; what is under it is drawn", () => {
+    const area = (brush: number, face: string): number => {
+      let sum = 0;
+      for (const f of faces) {
+        if (f.brush !== brush || f.basis.face !== face) continue;
+        forEachVisibleCell(f, (c) => {
+          const a = (f.n + 1) % 3;
+          const b = (f.n + 2) % 3;
+          sum += Math.abs((c[2][a] - c[0][a]) * (c[2][b] - c[0][b]));
+        });
+      }
+      return sum;
+    };
+    // Top: the whole slab except under the machine standing on it.
+    const full = (slab.x1 - slab.x0) * (slab.z1 - slab.z0);
+    expect(area(GRATE, "py")).toBeGreaterThan(full - 0.7);
+    // Underside: over the open pit (between the beams).
+    expect(area(GRATE, "ny")).toBeGreaterThan(
+      (PIT.x1 - PIT.x0) * (PIT.z1 - PIT.z0) - 0.4,
+    );
+    // The ledges and beams the slab rests on show their tops.
+    data.brushes.forEach((b, i) => {
+      if (Math.abs(b.max.y - slab.y0) > 1e-9 || i === GRATE) return;
+      if (!boxesOverlap({ ...brushes[i], y1: 0 }, slab)) return;
+      expect([i, area(i, "py") > 0]).toEqual([i, true]);
+    });
+  });
+
+  test("standing on and around the grate, every ray through it into the pit ends on a front face", () => {
+    const eyes: number[][] = [];
+    for (const x of [8.45, 8.9, 9.4, 9.9, 10.25, 10.6]) {
+      for (const z of [1.6, 2.2, 2.7, 3.3, 4.0, 4.7, 5.3, 5.9, 6.6]) {
+        for (const y of [0.55, 0.85, 1.65]) {
+          if (clear(x, y, z)) eyes.push([x, y, z]);
+        }
+      }
+    }
+    expect(eyes.length).toBeGreaterThan(100);
+    const failures: string[] = [];
+    let intoPit = 0;
+    for (const o of eyes) {
+      for (let x = slab.x0 + 0.03; x < slab.x1; x += 0.17) {
+        for (let z = slab.z0 + 0.03; z < slab.z1; z += 0.17) {
+          const d = [x - o[0], -o[1], z - o[2]];
+          const len = Math.hypot(d[0], d[1], d[2]);
+          const dir = d.map((q) => q / len);
+          // Seen through the gaps: grate faces are passed through.
+          const hit = grid.cast(o, dir, 60, SEE_THROUGH_MATERIALS);
+          if (!hit || !hit.front) {
+            const what = hit ? `back of ${hit.material}` : "nothing";
+            failures.push(`from ${fmt(o)} towards ${fmt(dir)}: ${what}`);
+          } else if (hit.t > len) intoPit++;
+          // Seen on the bars: the grate itself (or what stands on it).
+          const bar = grid.cast(o, dir, 60);
+          if (!bar || !bar.front) failures.push(`bar from ${fmt(o)}`);
+        }
+      }
+    }
+    expect(failures.slice(0, 20)).toEqual([]);
+    expect(intoPit).toBeGreaterThan(10000);
+  });
+
+  test("sealed from inside the pit and through the grate", () => {
+    const points: number[][] = [];
+    for (let x = PIT.x0 + 0.07; x < PIT.x1; x += 0.27) {
+      for (let z = PIT.z0 + 0.07; z < PIT.z1; z += 0.27) {
+        for (const y of [-1.0, -0.65, -0.3, -0.1]) {
+          if (clear(x, y, z)) points.push([x, y, z]);
+        }
+      }
+    }
+    // And the corridor around the grate, where rays pass through it.
+    for (let x = 8.4; x < 10.8; x += 0.3) {
+      for (let z = -1.1; z < 7.6; z += 0.3) {
+        for (const y of [0.3, 1.2, 2.2]) {
+          if (clear(x, y, z)) points.push([x, y, z]);
+        }
+      }
+    }
+    expect(points.length).toBeGreaterThan(400);
+    const failures: string[] = [];
+    const rays = 96;
+    points.forEach((o, n) => {
+      const spin = n * 0.7548776662;
+      for (let i = 0; i < rays; i++) {
+        const y = 1 - (2 * (i + 0.5)) / rays;
+        const r = Math.sqrt(1 - y * y);
+        const a = i * Math.PI * (3 - Math.sqrt(5)) + spin;
+        const d = [Math.cos(a) * r, y, Math.sin(a) * r];
+        for (const through of [undefined, SEE_THROUGH_MATERIALS]) {
+          const hit = grid.cast(o, d, 60, through);
+          if (!hit || !hit.front) {
+            const what = hit ? `back of ${hit.material}` : "nothing";
+            failures.push(
+              `from ${fmt(o)} towards ${fmt(d)}${through ? " (through grates)" : ""}: ${what}`,
+            );
+          }
+        }
+      }
+    });
+    expect(failures.slice(0, 20)).toEqual([]);
+    expect(failures.length).toBe(0);
+  });
+
+  test("footsteps on the grate resolve to the slab, a metal surface", () => {
+    for (const [x, z] of [
+      [9.3, 4.0],
+      [8.35, 2.55],
+      [9.3, 3.5],
+      [10.0, 4.5],
+      [10.75, 5.45],
+    ]) {
+      // The collider the player stands on: the highest top at or below the
+      // feet among those under the point.
+      let best = -1;
+      colliders.forEach((c, i) => {
+        if (x < c.min.x || x > c.max.x || z < c.min.z || z > c.max.z) return;
+        if (c.max.y > 1e-6) return;
+        if (best < 0 || c.max.y > colliders[best].max.y) best = i;
+      });
+      expect([x, z, best]).toEqual([x, z, GRATE]);
+      const b = data.brushes[best];
+      expect(b.faces?.py ?? b.material).toBe("metal_grate");
+      expect(MATERIALS[b.material].surface).toBe("metal");
+      // No other collider top within 3 cm below the grate top.
+      colliders.forEach((c, i) => {
+        if (i === GRATE) return;
+        if (x < c.min.x || x > c.max.x || z < c.min.z || z > c.max.z) return;
+        if (c.max.y > 1e-6) return;
+        expect(c.max.y).toBeLessThan(-0.03);
+      });
+    }
+  });
+
+  test("the pit is lit: dimly through the grate, red near its lamp", () => {
+    const pitFloor = meshes
+      .filter((m) => m.material === "concrete_floor")
+      .flatMap((m) => {
+        const out: number[][] = [];
+        for (let i = 0; i < m.positions.length / 3; i++) {
+          if (Math.abs(m.positions[i * 3 + 1] - PIT.floor) > 1e-6) continue;
+          out.push([
+            m.positions[i * 3],
+            m.positions[i * 3 + 2],
+            ...m.colors!.subarray(i * 3, i * 3 + 3),
+          ]);
+        }
+        return out;
+      });
+    expect(pitFloor.length).toBeGreaterThan(20);
+    // Near the lamp the floor is red, far from it no brighter than dim.
+    const near = pitFloor.filter(
+      (p) => Math.hypot(p[0] - 9.05, p[1] - 5.15) < 0.6,
+    );
+    expect(near.length).toBeGreaterThan(0);
+    for (const p of near) {
+      expect(p[2]).toBeGreaterThan(p[3] * 1.5);
+      expect(p[2]).toBeLessThan(0.9);
+    }
+    for (const p of pitFloor)
+      expect(Math.max(p[2], p[3], p[4])).toBeLessThan(0.9);
+  });
+});
+
+describe("light baking through see-through brushes", () => {
+  test("a see-through slab passes 1 - SEE_THROUGH_OPACITY of a light", () => {
+    const light = {
+      position: { x: 0, y: 2, z: 0 },
+      color: { x: 1, y: 1, z: 1 },
+      radius: 10,
+      intensity: 1,
+      flicker: "none" as const,
+    };
+    const ambient = { x: 0, y: 0, z: 0 };
+    const slabBox: Box = { x0: -5, x1: 5, y0: -0.05, y1: 0, z0: -5, z1: 5 };
+    const open = new LightBaker([], [light], ambient).sample(0, -1, 0, 0, 1, 0);
+    const grate = new LightBaker([slabBox], [light], ambient, [true]).sample(
+      0,
+      -1,
+      0,
+      0,
+      1,
+      0,
+    );
+    const solid = new LightBaker([slabBox], [light], ambient).sample(
+      0,
+      -1,
+      0,
+      0,
+      1,
+      0,
+    );
+    expect(open[0]).toBeGreaterThan(0.3);
+    expect(grate[0]).toBeCloseTo(open[0] * (1 - SEE_THROUGH_OPACITY), 6);
+    expect(solid[0]).toBe(0);
+    // A point just under the slab (its shadow ray starts inside it) too.
+    const under = new LightBaker([slabBox], [light], ambient, [true]).sample(
+      0,
+      -0.06,
+      0,
+      0,
+      1,
+      0,
+    );
+    const underOpen = new LightBaker([], [light], ambient).sample(
+      0,
+      -0.06,
+      0,
+      0,
+      1,
+      0,
+    );
+    expect(under[0]).toBeCloseTo(underOpen[0] * (1 - SEE_THROUGH_OPACITY), 6);
   });
 });

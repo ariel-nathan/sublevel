@@ -1,5 +1,5 @@
 import type { Color, LightDef } from "../core/api";
-import { segmentHitsBox, type Box } from "./geometry";
+import { containsPoint, segmentHitsBox, type Box } from "./geometry";
 
 /** Maximum value of any baked colour channel. */
 export const MAX_BAKED = 2.0;
@@ -16,10 +16,18 @@ const JITTER: readonly (readonly [number, number, number])[] = [
   [-0.1, 0.08, -0.1],
 ];
 
+/**
+ * Fraction of light a see-through brush (a floor grate) stops: its solid
+ * area. Shadow rays through it carry on with the rest.
+ */
+export const SEE_THROUGH_OPACITY = 0.55;
+
 interface BakedLight {
   def: LightDef;
-  /** Brushes that can possibly block this light's rays. */
+  /** Opaque brushes that can possibly block this light's rays. */
   blockers: Box[];
+  /** See-through brushes that can possibly dim them. */
+  filters: Box[];
 }
 
 /** Bakes steady lights into per-vertex colours. */
@@ -27,10 +35,15 @@ export class LightBaker {
   private readonly lights: BakedLight[] = [];
   private readonly ambient: Color;
 
+  /**
+   * `seeThrough[i]` marks brush i as see-through: it passes
+   * 1 - SEE_THROUGH_OPACITY of the light instead of blocking it.
+   */
   constructor(
     brushes: readonly Box[],
     lights: readonly LightDef[],
     ambient: Color,
+    seeThrough: readonly boolean[] = [],
   ) {
     this.ambient = ambient;
     const shrunk = brushes.map((b) => ({
@@ -45,16 +58,18 @@ export class LightBaker {
       if (def.flicker !== "none") continue;
       const p = def.position;
       const r = def.radius;
-      const blockers = shrunk.filter(
-        (b) =>
-          b.x0 < p.x + r &&
-          b.x1 > p.x - r &&
-          b.y0 < p.y + r &&
-          b.y1 > p.y - r &&
-          b.z0 < p.z + r &&
-          b.z1 > p.z - r,
-      );
-      this.lights.push({ def, blockers });
+      const near = (b: Box): boolean =>
+        b.x0 < p.x + r &&
+        b.x1 > p.x - r &&
+        b.y0 < p.y + r &&
+        b.y1 > p.y - r &&
+        b.z0 < p.z + r &&
+        b.z1 > p.z - r;
+      this.lights.push({
+        def,
+        blockers: shrunk.filter((b, i) => !seeThrough[i] && near(b)),
+        filters: shrunk.filter((b, i) => seeThrough[i] === true && near(b)),
+      });
     }
   }
 
@@ -78,7 +93,19 @@ export class LightBaker {
           break;
         }
       }
-      if (!blocked) visible++;
+      if (blocked) continue;
+      // A ray starting inside a grate (a point just under it) still passes
+      // through it.
+      let pass = 1;
+      for (const b of light.filters) {
+        if (
+          containsPoint(b, ox, oy, oz) ||
+          segmentHitsBox(ox, oy, oz, dx, dy, dz, 1, b)
+        ) {
+          pass *= 1 - SEE_THROUGH_OPACITY;
+        }
+      }
+      visible += pass;
     }
     return visible / JITTER.length;
   }

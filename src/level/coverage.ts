@@ -7,6 +7,11 @@
  * reference cameras, then a sweep of positions in every room at crouch, eye
  * and jump height looking in eight directions and up/down, with both doors
  * closed and then open. Images with holes are written to `outDir`.
+ *
+ * The coverage view keeps the renderer's alpha test, so the view continues
+ * through the gaps of see-through (cut-out) materials such as the corridor
+ * grate to whatever is behind them: the pit under the grate is checked from
+ * the spots on and around it.
  */
 import { launchGame } from "../../tools/browser";
 
@@ -37,6 +42,8 @@ const spots: [number, number, number][] = [
   [9.5, 0, 0],
   [9.5, 2.5, 0],
   [9.5, 4.5, 0],
+  [8.7, 3.0, 0],
+  [9.9, 5.2, 0],
   [9.5, 7, 0],
   [9.5, 8.5, 0],
   [7, 9.5, 0],

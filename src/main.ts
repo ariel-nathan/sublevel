@@ -107,12 +107,18 @@ async function start(): Promise<void> {
     return;
   }
 
-  guardBrowserShortcuts(() => input.locked);
+  let restarting = false;
+  guardBrowserShortcuts(() => input.locked && !restarting);
   const recorder = new ReplayRecorder();
   window.addEventListener("keydown", (event) => {
     if (event.code === "F8") {
       event.preventDefault();
       saveReplay(recorder);
+    }
+    // After escaping, R starts a fresh run.
+    if (event.code === "KeyR" && game.finished) {
+      restarting = true;
+      location.reload();
     }
   });
   runLoop({

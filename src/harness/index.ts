@@ -13,6 +13,8 @@ import { decodeReplay, type Replay } from "./replay";
 
 export interface HarnessState {
   step: number;
+  /** True once the player has reached the exit. */
+  finished: boolean;
   player: {
     feet: Vec3;
     velocity: Vec3;
@@ -133,6 +135,7 @@ export function installHarness(
       const aim = player.aim;
       return {
         step: game.stepCount,
+        finished: game.finished,
         player: {
           feet: roundVec(player.feet),
           velocity: roundVec(player.velocity),

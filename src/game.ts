@@ -1,4 +1,10 @@
-import { createAudioSystem } from "./audio";
+import {
+  contactMaterialOf,
+  createAudioSystem,
+  createContactVoicePool,
+  measureOcclusion,
+  roomAt,
+} from "./audio";
 import type {
   BuiltLevel,
   Camera,
@@ -6,12 +12,14 @@ import type {
   DrawItem,
   HudState,
   LightDef,
+  LoopHandle,
   PhysicsWorld,
   Player,
   PlayerEvent,
   PlayerInput,
   PointLight,
   Renderer,
+  RoomAcoustics,
   SoundId,
   WorldEvent,
   WorldObjects,
@@ -99,6 +107,8 @@ export interface Game {
   readonly stepCount: number;
   /** Player and world events, most recent last. */
   readonly log: readonly GameLogEntry[];
+  /** True once the player has reached the exit. */
+  readonly finished: boolean;
   /** What the HUD showed on the last rendered frame. */
   readonly hud: Readonly<HudState>;
   /** When set, rendering uses this view in place of the player's eyes. */
@@ -158,13 +168,41 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
   const player = createPlayer({ physics, spawn: level.data.playerSpawn });
   const hud = createHud(document.body);
   const audio = createAudioSystem();
+  /** Positional emitter loops, kept so they can be muffled behind walls. */
+  const emitterLoops: { handle: LoopHandle; position: Vec3 }[] = [];
   for (const emitter of level.data.emitters) {
-    audio.startLoop(emitter.sound, {
-      position:
-        emitter.sound === "ambient_drone" ? undefined : emitter.position,
+    const positional = emitter.sound !== "ambient_drone";
+    const handle = audio.startLoop(emitter.sound, {
+      position: positional ? emitter.position : undefined,
       gain: emitter.gain,
     });
+    if (positional) {
+      emitterLoops.push({ handle, position: emitter.position });
+    }
   }
+
+  // Where the listener was on the last rendered frame.
+  let listenerPosition: Vec3 = v3.add(
+    level.data.playerSpawn.position,
+    v3.create(0, 1.65, 0),
+  );
+  // Walls and doors muffle sound; loose props do not.
+  const occlusionRay = (
+    origin: Vec3,
+    direction: Vec3,
+    maxDistance: number,
+  ): number | null => {
+    const hit = physics.raycast(origin, direction, maxDistance);
+    return hit && hit.collider.kind !== "body" ? hit.distance : null;
+  };
+  const occlusionOf = (position: Vec3): number =>
+    measureOcclusion(listenerPosition, position, occlusionRay);
+
+  // Scrape and roll sounds that follow sliding props.
+  const contactPool = createContactVoicePool();
+  const contactLoops = new Map<string, LoopHandle>();
+  let room: RoomAcoustics = "corridor";
+  let finished = false;
 
   let stepCount = 0;
   let message: string | null = "Find the way out";
@@ -202,24 +240,40 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
         }
         audio.play(IMPACTS[event.surface], {
           position: event.position,
+          occlusion: occlusionOf(event.position),
           gain: 0.1 + 0.9 * strength ** 0.8,
           pitch: 1.08 - 0.16 * strength + (vary() - 0.5) * 0.06,
         });
         break;
       }
       case "break":
-        audio.play("crate_break", { position: event.position });
+        audio.play("crate_break", {
+          position: event.position,
+          occlusion: occlusionOf(event.position),
+        });
         break;
       case "objective":
-        message = "Exit unlocked";
-        messageTime = 4;
+        if (!finished) {
+          message = "Exit unlocked";
+          messageTime = 4;
+        }
         break;
-      case "timer_tick":
-      case "door_blocked":
-        // Sounds for these are wired in once the audio module has them.
+      case "timer_tick": {
+        // The last three seconds tick higher and louder.
+        const urgent = event.remaining <= 3;
+        audio.play("timer_tick", {
+          position: event.position,
+          gain: urgent ? 1 : 0.8,
+          pitch: urgent ? 1.2 : 1,
+          occlusion: occlusionOf(event.position),
+        });
         break;
+      }
       default:
-        audio.play(event.type, { position: event.position });
+        audio.play(event.type, {
+          position: event.position,
+          occlusion: occlusionOf(event.position),
+        });
     }
   };
 
@@ -266,6 +320,9 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
       return stepCount;
     },
     log,
+    get finished() {
+      return finished;
+    },
     get hud() {
       return hudState;
     },
@@ -290,7 +347,79 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
       if (player.heldBody !== null && !physics.getBody(player.heldBody)) {
         player.releaseHeld();
       }
-      if (messageTime > 0) {
+      // Scrape and roll loops follow whatever is sliding.
+      const sliding = physics.slidingContacts().flatMap((contact) => {
+        const body = physics.getBody(contact.body);
+        return body
+          ? [
+              {
+                body: contact.body,
+                material: contactMaterialOf(body.tag),
+                slipSpeed: contact.slipSpeed,
+                rollSpeed: contact.rollSpeed,
+                force: contact.force,
+                position: contact.point,
+              },
+            ]
+          : [];
+      });
+      const refreshOcclusion = stepCount % 6 === 0;
+      for (const command of contactPool.update(sliding, FIXED_DT)) {
+        let handle = contactLoops.get(command.key);
+        if (!handle) {
+          handle = audio.startLoop(command.sound, {
+            gain: 0,
+            position: command.position,
+          });
+          contactLoops.set(command.key, handle);
+        }
+        audio.setLoopParams(
+          handle,
+          {
+            gain: command.gain,
+            pitch: command.pitch,
+            position: command.position,
+            occlusion: refreshOcclusion
+              ? occlusionOf(command.position)
+              : undefined,
+          },
+          command.fade,
+        );
+      }
+      if (refreshOcclusion) {
+        for (const emitter of emitterLoops) {
+          audio.setLoopParams(
+            emitter.handle,
+            { occlusion: occlusionOf(emitter.position) },
+            0.15,
+          );
+        }
+      }
+      room = roomAt(level.data.zones, listenerPosition, room);
+      audio.setRoom(room);
+
+      // Reaching the exit completes the demo; play continues afterwards.
+      if (!finished) {
+        const feet = player.feet;
+        const exit = level.data.exit;
+        if (
+          feet.x >= exit.min.x &&
+          feet.x <= exit.max.x &&
+          feet.y >= exit.min.y - 0.1 &&
+          feet.y <= exit.max.y &&
+          feet.z >= exit.min.z &&
+          feet.z <= exit.max.z
+        ) {
+          finished = true;
+          const seconds = Math.round(stepCount * FIXED_DT);
+          const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+          message = `Escaped in ${clock}  -  press R to restart`;
+          messageTime = Number.POSITIVE_INFINITY;
+          audio.play("objective");
+        }
+      }
+      // The end message stays up; every other message times out.
+      if (Number.isFinite(messageTime) && messageTime > 0) {
         messageTime -= FIXED_DT;
       }
     },
@@ -302,6 +431,7 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
         camera.position = override.position;
         camera.orientation = quat.fromYawPitch(override.yaw, override.pitch);
       }
+      listenerPosition = camera.position;
       audio.setListener(
         camera.position,
         quat.rotate(camera.orientation, v3.create(0, 0, -1)),
@@ -332,9 +462,11 @@ export async function createGame(canvas: HTMLCanvasElement): Promise<Game> {
           ? "E  Drop     Click  Throw"
           : prompt === "Too heavy"
             ? "Too heavy to lift"
-            : prompt
-              ? `E  ${prompt}`
-              : null,
+            : prompt === "Out of reach"
+              ? "Out of reach: hit it with something"
+              : prompt
+                ? `E  ${prompt}`
+                : null,
         message: messageTime > 0 ? message : null,
       };
       hud.update(hudState);

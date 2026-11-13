@@ -13,7 +13,7 @@ export const TILE_SIZE: Readonly<Record<MaterialId, number>> = {
   concrete_wall: 2,
   concrete_floor: 2,
   ceiling_panel: 2,
-  lab_wall: 2,
+  lab_wall: 3,
   lab_floor_tile: 2,
   metal_panel: 2,
   metal_grate: 1,

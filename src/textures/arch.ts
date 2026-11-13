@@ -93,7 +93,7 @@ export const concreteFloor = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
   tone(c, g, 3, 3, 0.86, 1.14);
-  c.grime(g.noise, 6, 6, 12, 0.55, 1.3, hex(0x45474a));
+  c.grime(g.noise, 6, 6, 12, 0.62, 0.7, hex(0x4a4c4f));
   // expansion joints through the middle (symmetric, away from the wrap edge)
   for (let i = 0; i < n; i++) {
     c.shade(i, 63, 0.62);
@@ -107,8 +107,8 @@ export const concreteFloor = (c: Canvas, g: GenContext): void => {
   crack(c, g, 90, 10, 60, 1.9, hex(0x2c2d2f), 0.9);
   crack(c, g, 20, 100, 36, -0.4, hex(0x2c2d2f), 0.8);
   crack(c, g, 108, 80, 22, 2.6, hex(0x2c2d2f), 0.7);
-  c.scuffs(rng, 90, hex(0x8c8d8b), 0.28, 7);
-  c.scuffs(rng, 50, hex(0x303234), 0.3, 6);
+  c.scuffs(rng, 60, hex(0x8c8d8b), 0.22, 7);
+  c.scuffs(rng, 30, hex(0x303234), 0.22, 6);
   c.speckle(rng, 220, hex(0x3b3d3f), 0.5);
   c.speckle(rng, 80, hex(0x9a9b98), 0.3);
   c.grain(rng, 0.035);
@@ -148,47 +148,87 @@ export const ceilingPanel = (c: Canvas, g: GenContext): void => {
   c.grain(rng, 0.02);
 };
 
+/**
+ * Full floor-to-ceiling wall section, 128 px = 3 m (42.7 px per metre). Row 127
+ * is the floor line, row 0 the ceiling. The top and bottom rows are the same dark
+ * teal (crown trim and base shadow), so the tile also wraps vertically.
+ * Panel seams sit on x = 0 and x = 64: two 1.5 m panels per repeat.
+ */
 export const labWall = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
   const paper = hex(0xdde2de);
-  const teal = hex(0x3f7c7b);
+  const tealMain = hex(0x3f7c7b);
+  const tealDark = hex(0x2b5c5d);
+  const RAIL = 84;
+  const WAIN = 89;
+  const BASE = 120;
   c.each((x, y) => {
-    if (y < 36) return paper;
-    if (y === 36) return hex(0xf6f8f5);
-    if (y === 37) return hex(0xb9c4c2);
-    if (y === 38) return hex(0x28585a);
-    if (y < 62) return teal;
-    if (y === 62) return hex(0x2b5c5d);
+    // crown trim under the ceiling
+    if (y <= 1) return tealDark;
+    if (y === 2) return tealMain;
+    if (y === 3) return hex(0x86bab6);
+    if (y === 4) return hex(0xb4bebb);
+    // wainscot rail: lit top face, dark nosing, shadow on the wainscot
+    if (y === RAIL - 1) return hex(0xf3f6f2);
+    if (y === RAIL) return hex(0x8fc1bd);
+    if (y > RAIL && y < WAIN - 1) return hex(0x23595a);
+    if (y === WAIN - 1) return hex(0x1a4546);
+    if (y >= WAIN) {
+      // darkens toward the floor so the bottom row matches the crown
+      if (y >= BASE)
+        return mix(tealMain, tealDark, (y - BASE + 1) / (n - BASE));
+      if (y === WAIN) return mix(tealMain, hex(0x173a3c), 0.55);
+      return tealMain;
+    }
     return paper;
   });
-  // painted-metal sheen: soft vertical tone
-  tone(c, g, 2, 2, 0.95, 1.04);
-  // wainscot shading under the trim, light at the bottom of the band
-  for (let y = 39; y < 44; y++) c.shadeRect(0, y, n, 1, 0.97 - (44 - y) * 0.01);
-  // panel seams: 2px grooves on the tile boundaries and the middle
-  for (const sx of [31, 63]) {
-    for (let y = 0; y < n; y++) {
-      c.shade(sx, y, 0.72);
-      c.shade(sx + 1, y, 0.78);
-      c.shade(sx + 2, y, 1.06);
+  // painted sheen and a faint tone per panel
+  tone(c, g, 2, 2, 0.96, 1.03);
+  c.each((x, y, col) => {
+    if (y <= 4 || (y >= RAIL - 1 && y < WAIN)) return;
+    return scale(col, x < 64 ? 1 : 0.975);
+  });
+  // seams between the two panels, centred on x = 0 and x = 64
+  for (const s of [0, 64]) {
+    for (let y = 5; y < BASE; y++) {
+      if (y >= RAIL - 1 && y < WAIN) continue;
+      const w = y >= WAIN ? 0.5 : 1;
+      c.shade(s - 1, y, 1 - 0.25 * w);
+      c.shade(s, y, 1 - 0.3 * w);
+      c.shade(s + 1, y, 1 + 0.06 * w);
+    }
+  }
+  // fine grooves in the wainscot
+  for (const s of [32, 96]) {
+    for (let y = WAIN + 1; y < BASE; y++) {
+      c.shade(s, y, 0.8);
+      c.shade(s + 1, y, 1.07);
     }
   }
   // screws on the seams
-  for (const sx of [31, 63]) {
-    for (const sy of [8, 28, 48]) {
-      c.blend(sx, sy, hex(0x8c9695), 1);
-      c.blend(sx + 1, sy, hex(0xb9c2c0), 1);
-      c.blend(sx, sy + 1, hex(0x6f7a79), 1);
-      c.blend(sx + 1, sy + 1, hex(0x7e8887), 1);
+  for (const s of [0, 64]) {
+    for (const sy of [16, 48, 70, 104]) {
+      c.blend(s - 1, sy, hex(0x8c9695), 1);
+      c.blend(s, sy, hex(0xc2cac8), 1);
+      c.blend(s - 1, sy + 1, hex(0x6f7a79), 1);
+      c.blend(s, sy + 1, hex(0x8a9493), 1);
     }
   }
-  // grime above the floor line and scuffs
-  c.grime(g.noise, 4, 4, 5, 0.58, 0.9, hex(0x9aa09a));
-  c.scuffs(rng, 24, hex(0x9fb5b3), 0.35, 6);
-  c.scuffs(rng, 20, hex(0x1f4748), 0.3, 5);
-  c.speckle(rng, 50, hex(0xaeb4ae), 0.5);
-  c.grain(rng, 0.018);
+  // soft grime and scuffs
+  c.grime(g.noise, 4, 4, 5, 0.6, 0.7, hex(0xa3a9a3));
+  for (let i = 0; i < 26; i++) {
+    const x = rng.int(0, n - 1);
+    const y = rng.int(92, 116);
+    c.line(x, y, x + rng.int(-4, 4), y + rng.int(-2, 2), hex(0x8dbab6), 0.3);
+  }
+  for (let i = 0; i < 14; i++) {
+    const x = rng.int(0, n - 1);
+    const y = rng.int(40, 82);
+    c.line(x, y, x + rng.int(-3, 3), y + rng.int(1, 4), hex(0xb6bcb6), 0.35);
+  }
+  c.speckle(rng, 40, hex(0xaeb4ae), 0.45);
+  c.grain(rng, 0.015);
 };
 
 export const labFloorTile = (c: Canvas, g: GenContext): void => {
@@ -252,40 +292,52 @@ export const metalPanel = (c: Canvas, g: GenContext): void => {
     c.set(rx, ry - 1, hex(0xc6cdd0));
     c.set(rx + 1, ry + 1, hex(0x677075));
   }
-  c.grime(g.noise, 5, 5, 6, 0.57, 1.0, hex(0x4e5558));
-  c.scuffs(rng, 34, hex(0xc4cacc), 0.3, 8);
-  c.scuffs(rng, 18, hex(0x2f3538), 0.3, 6);
+  c.grime(g.noise, 5, 5, 6, 0.64, 0.55, hex(0x555c5f));
+  c.scuffs(rng, 22, hex(0xc4cacc), 0.24, 8);
+  c.scuffs(rng, 10, hex(0x2f3538), 0.24, 6);
   c.grain(rng, 0.03);
 };
 
+/**
+ * Floor grating with real openings (alpha 0). Bearing bars run along v, four
+ * texels wide on an eight texel pitch; two-texel cross rods bridge the gaps,
+ * alternate gaps offset by half a rod pitch so the mesh looks woven. About 44%
+ * of the area is open. No frame: it tiles across a whole grating section.
+ */
 export const metalGrate = (c: Canvas, g: GenContext): void => {
   const n = c.size;
   const { rng } = g;
-  // the floor below, deep in the gaps
-  c.each((x, y) =>
-    scale(hex(0x2a2e31), 0.85 + 0.3 * g.noise.fbm(x / n, y / n, 8, 8, 2, 2)),
-  );
-  // cross rods
-  c.each((x, y, col) => {
-    const dy = y % 16;
-    if (dy === 15) return hex(0x5a6267);
-    if (dy === 0) return hex(0x5a6267);
-    return col;
-  });
-  // bearing bars, centred on the tile boundary, 3px wide
-  c.each((x, y, col) => {
+  const hole = hex(0x181b1d);
+  c.each((x, y) => {
     const dx = x % 8;
     const wear = 0.94 + 0.12 * g.noise.fbm(x / n, y / n, 8, 8, 2, 3);
-    if (dx === 7) return scale(hex(0xa7b0b4), wear);
-    if (dx === 0) return scale(hex(0x8c969a), wear);
-    if (dx === 1) return scale(hex(0x555d61), wear);
-    // shadow cast into the gap beside each bar
-    if (dx === 2) return scale(col, 0.7);
-    return col;
+    // bearing bar: lit top face with a darker lower edge
+    if (dx === 0) return scale(hex(0xcad2d5), wear);
+    if (dx === 1 || dx === 2) return scale(hex(0xa3adb1), wear);
+    if (dx === 3) return scale(hex(0x5a6368), wear);
+    // cross rod in this gap: lit upper row, shaded lower row
+    const dy = (y + (Math.floor(x / 8) % 2) * 8) % 16;
+    if (dy === 3) return scale(hex(0x929ca0), wear);
+    if (dy === 4) return scale(hex(0x535b60), wear);
+    return hole;
   });
-  c.grime(g.noise, 6, 6, 9, 0.56, 0.7, hex(0x585d5f));
-  c.speckle(rng, 30, hex(0x8a5f40), 0.7);
-  c.scuffs(rng, 20, hex(0xc8d0d3), 0.3, 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const dx = x % 8;
+      const dy = (y + (Math.floor(x / 8) % 2) * 8) % 16;
+      if (dx > 3 && dy !== 3 && dy !== 4) c.hole(x, y);
+    }
+  }
+  // wear and rust on the metal only
+  for (let i = 0; i < 40; i++) {
+    const x = rng.int(0, n - 1);
+    const y = rng.int(0, n - 1);
+    if (x % 8 <= 3) c.blend(x, y, hex(0x8a5f40), 0.6);
+  }
+  for (let i = 0; i < 30; i++) {
+    const x = rng.int(0, n - 1) & ~7;
+    c.blend(x, rng.int(0, n - 1), hex(0xeef2f3), 0.5);
+  }
   c.grain(rng, 0.03);
 };
 
@@ -371,28 +423,54 @@ export const doorSteel = (c: Canvas, g: GenContext): void => {
   c.grain(rng, 0.025);
 };
 
+/**
+ * Pressure plate top, stretched once over the whole plate. A bold yellow and
+ * black hazard border around a dark steel field with six raised tread bars and
+ * a pale centre mark, readable from across a room.
+ */
 export const pressurePlate = (c: Canvas, g: GenContext): void => {
+  const n = c.size;
   const { rng } = g;
+  const BORDER = 8;
+  const yellow = hex(0xe3b828);
+  const black = hex(0x24231f);
   c.each((x, y) => {
-    const inner = x >= 4 && x < 28 && y >= 4 && y < 28;
-    if (!inner) return hex(0xcaa024);
-    const u = (x - 4) % 8;
-    const v = (y - 4) % 8;
-    const d = Math.abs(u - 3.5) + Math.abs(v - 3.5);
-    if (d <= 3.5) {
-      // raised diamond: lit on its upper-left faces
-      return u + v < 7 ? hex(0xaab2b5) : hex(0x7f888c);
+    const edge = Math.min(x, y, n - 1 - x, n - 1 - y);
+    if (edge < BORDER) {
+      // diagonal stripes, 8 px each; corners fall out as mitres
+      const d = (x + y) % 16;
+      return d < 8 ? yellow : black;
     }
-    return hex(0x3f464a);
+    // inner steel field with raised tread bars (horizontal)
+    const v = y - BORDER;
+    const span = n - 2 * BORDER;
+    const k = v % 8;
+    const bar = Math.floor(v / 8) < Math.floor(span / 8);
+    if (bar && k < 5) {
+      if (k === 0) return hex(0xdde3e5);
+      if (k < 4) return hex(0xa4adb1);
+      return hex(0x666f74);
+    }
+    return hex(0x353b3f);
   });
-  // yellow border bevel and outline
-  c.bevel(1, 1, 30, 30, hex(0xe9cb5a), hex(0x93720f));
-  c.bevel(3, 3, 26, 26, hex(0x2e3437), hex(0xb9c1c4), 0.8);
-  c.frame(0, 0, 32, 32, hex(0x3a2f10));
-  c.grime(g.noise, 3, 3, 3, 0.52, 1.0, hex(0x5a4a1c));
-  c.scuffs(rng, 16, hex(0xcfd5d7), 0.3, 4);
-  c.scuffs(rng, 10, hex(0x1f2325), 0.3, 4);
-  c.grain(rng, 0.03);
+  // chamfer where the border meets the field
+  for (let i = BORDER - 1; i < n - BORDER + 1; i++) {
+    c.set(i, BORDER - 1, hex(0x15140f));
+    c.set(i, n - BORDER, hex(0x15140f));
+    c.set(BORDER - 1, i, hex(0x15140f));
+    c.set(n - BORDER, i, hex(0x15140f));
+  }
+  // lit top and left of the border, shaded bottom and right
+  c.bevel(0, 0, n, n, hex(0xf6e08a), hex(0x6c5410), 0.9);
+  c.frame(0, 0, n, n, hex(0x15140f));
+  // end caps of the bars: shadow under each bar
+  for (let v = 4; v < n - 2 * BORDER; v += 8) {
+    for (let x = BORDER; x < n - BORDER; x++) c.shade(x, BORDER + v, 0.8);
+  }
+  c.grime(g.noise, 3, 3, 3, 0.58, 0.8, hex(0x4f4420));
+  c.scuffs(rng, 10, hex(0xd0d6d8), 0.28, 5);
+  c.scuffs(rng, 8, hex(0x181b1d), 0.3, 5);
+  c.grain(rng, 0.025);
 };
 
 export const signWarning = (c: Canvas, g: GenContext): void => {

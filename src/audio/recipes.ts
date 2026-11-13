@@ -10,6 +10,8 @@
 import type { SoundId } from "../core/api";
 import type { Rng } from "../core/rng";
 import { TAU, applyChain, biquad, samples } from "./dsp";
+import { rollMetal, scrapeMetal, scrapePlastic, scrapeWood } from "./contact";
+import { doorBlocked, objective, timerTick } from "./cues";
 import { periodicNoisePair } from "./fft";
 import {
   MATERIALS,
@@ -1375,6 +1377,13 @@ export const RECIPES: Record<SoundId, Recipe> = {
   hum_fluorescent: humFluorescent,
   hum_machine: humMachine,
   ambient_drone: ambientDrone,
+  timer_tick: timerTick,
+  door_blocked: doorBlocked,
+  objective,
+  scrape_wood: scrapeWood,
+  scrape_metal: scrapeMetal,
+  scrape_plastic: scrapePlastic,
+  roll_metal: rollMetal,
 };
 
 /** How many distinct takes each sound has (1 = no variants). */
@@ -1399,4 +1408,11 @@ export const VARIANTS: Readonly<Record<SoundId, number>> = {
   hum_fluorescent: 1,
   hum_machine: 1,
   ambient_drone: 1,
+  timer_tick: 1,
+  door_blocked: 1,
+  objective: 1,
+  scrape_wood: 1,
+  scrape_metal: 1,
+  scrape_plastic: 1,
+  roll_metal: 1,
 };

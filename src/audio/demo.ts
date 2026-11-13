@@ -9,10 +9,21 @@ import {
   SOUND_IDS,
   type LoopHandle,
   type PlayOptions,
+  type RoomAcoustics,
   type SoundId,
 } from "../core/api";
 import type { Vec3 } from "../math";
 import { CANDIDATE_INFO } from "./candidates";
+import {
+  CONTACT_LOOPS,
+  contactLoopFor,
+  contactLoopParams,
+  createContactVoicePool,
+  type ContactInput,
+  type ContactKind,
+  type ContactLoop,
+  type ContactMaterial,
+} from "./contactVoices";
 import { candidateOf, createAudioSystem, renderVariant } from "./index";
 import {
   CANDIDATE_NAMES,
@@ -24,6 +35,8 @@ import {
 } from "./mix";
 
 const audio = createAudioSystem();
+// For headless smoke tests (tools/browser.ts) and the console.
+(globalThis as { __audio?: unknown }).__audio = audio;
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 
@@ -99,7 +112,9 @@ function optionsFor(sound: SoundId, level: Level): PlayOptions {
 }
 
 function play(sound: SoundId, options: PlayOptions): void {
-  void audio.resume().then(() => audio.play(sound, options));
+  void audio
+    .resume()
+    .then(() => audio.play(sound, { ...options, occlusion: occlusion() }));
 }
 
 function drawWave(sound: SoundId): void {
@@ -197,7 +212,7 @@ function select(family: Family, candidate: Candidate): void {
   showSelection();
 }
 
-/** Footsteps as the game plays them: every 0.39 s, gain 0.5, pitch ±4 %. */
+/** Footsteps as the game plays them: every 0.39 s, gain 0.5, pitch ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±4 %. */
 function walk(sound: SoundId): void {
   drawWave(sound);
   schedule(
@@ -405,7 +420,7 @@ walks.append(
             e.sound === "crate_break"
               ? { position: e.pos }
               : { ...impactOptions(e.strength), position: e.pos };
-          audio.play(e.sound, options);
+          audio.play(e.sound, { ...options, occlusion: occlusion() });
         }, e.at);
       }
       // A footstep in the middle of it must survive (priority test).
@@ -424,6 +439,7 @@ const EMITTER_GAIN: Partial<Record<SoundId, number>> = {
   ambient_drone: 0.4,
 };
 for (const sound of LOOPING_SOUNDS) {
+  if (CATEGORY_OF[sound] === "contact") continue;
   const b = button(`${sound} (loop)`, () => {
     void audio.resume().then(() => {
       const existing = loopHandles.get(sound);
@@ -436,6 +452,7 @@ for (const sound of LOOPING_SOUNDS) {
           sound,
           audio.startLoop(sound, {
             gain: EMITTER_GAIN[sound] ?? 0.5,
+            occlusion: occlusion(),
             position:
               sound === "ambient_drone" ? undefined : { x: 0, y: 1.6, z: 0 },
           }),
@@ -457,3 +474,273 @@ function sync(): void {
 for (const input of [masterInput, distanceInput, reverbInput])
   input.addEventListener("input", sync);
 sync();
+
+// --- Round 2: room, occlusion, contact loops, new cues --------------------------
+
+const roomInput = $<HTMLSelectElement>("room");
+const occlusionInput = $<HTMLInputElement>("occlusion");
+const occlusionLabel = $<HTMLSpanElement>("occlusionv");
+const dragsBox = $<HTMLDivElement>("drags");
+const pushesBox = $<HTMLDivElement>("pushes");
+const cuesBox = $<HTMLDivElement>("cues");
+
+function occlusion(): number {
+  return Number(occlusionInput.value);
+}
+
+roomInput.value = audio.room();
+roomInput.addEventListener("change", () => {
+  void audio.resume().then(() => {
+    audio.setRoom(roomInput.value as RoomAcoustics);
+    status.textContent = `room: ${audio.room()}`;
+  });
+});
+
+/** Every loop this page is playing, so occlusion reaches all of them. */
+const playingLoops = (): LoopHandle[] => [
+  ...loopHandles.values(),
+  ...drags.flatMap((d) => (d.handle ? [d.handle] : [])),
+  ...pushHandles.values(),
+];
+
+function syncOcclusion(): void {
+  occlusionLabel.textContent = occlusion().toFixed(2);
+  for (const h of playingLoops())
+    audio.setLoopParams(h, { occlusion: occlusion() }, 0.12);
+}
+occlusionInput.addEventListener("input", syncOcclusion);
+
+interface Drag {
+  sound: ContactLoop;
+  kind: ContactKind;
+  material: ContactMaterial;
+  speed: HTMLInputElement;
+  force: HTMLInputElement;
+  readout: HTMLSpanElement;
+  handle: LoopHandle | null;
+}
+
+const DRAG_FORCE: Record<ContactLoop, number> = {
+  scrape_wood: 245,
+  scrape_metal: 590,
+  scrape_plastic: 70,
+  roll_metal: 345,
+};
+const DRAG_MATERIAL: Record<ContactLoop, ContactMaterial> = {
+  scrape_wood: "wood",
+  scrape_metal: "metal",
+  scrape_plastic: "plastic",
+  roll_metal: "metal",
+};
+
+function slider(min: number, max: number, step: number, value: number) {
+  const s = document.createElement("input");
+  s.type = "range";
+  s.min = String(min);
+  s.max = String(max);
+  s.step = String(step);
+  s.value = String(value);
+  return s;
+}
+
+/** The loop parameters a drag row asks for, as the game computes them. */
+function dragParams(d: Drag): { gain: number; pitch: number } {
+  const p = contactLoopParams(
+    d.kind,
+    Number(d.speed.value),
+    Number(d.force.value),
+  );
+  const loop = contactLoopFor(d.material, d.kind);
+  return { gain: p.gain * loop.gain, pitch: p.pitch * loop.pitch };
+}
+
+const drags: Drag[] = CONTACT_LOOPS.map((sound) => {
+  const row = document.createElement("div");
+  row.className = "row drag";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = sound;
+  const d: Drag = {
+    sound,
+    kind: sound.startsWith("roll") ? "roll" : "scrape",
+    material: DRAG_MATERIAL[sound],
+    speed: slider(0, 2.5, 0.01, 0.8),
+    force: slider(0, 800, 5, DRAG_FORCE[sound]),
+    readout: document.createElement("span"),
+    handle: null,
+  };
+  d.readout.className = "readout";
+  const toggle = button("drag", () => {
+    void audio.resume().then(() => {
+      if (d.handle) {
+        audio.setLoopParams(d.handle, { gain: 0 }, 0.08);
+        const h = d.handle;
+        setTimeout(() => audio.stopLoop(h), 150);
+        d.handle = null;
+        toggle.classList.remove("on");
+      } else {
+        drawWave(sound);
+        d.handle = audio.startLoop(sound, {
+          gain: 0,
+          position: near(2.5, 0.5),
+          occlusion: occlusion(),
+        });
+        toggle.classList.add("on");
+      }
+    });
+  });
+  const speedLabel = document.createElement("label");
+  speedLabel.append("speed ", d.speed);
+  const forceLabel = document.createElement("label");
+  forceLabel.append("force ", d.force);
+  row.append(name, toggle, speedLabel, forceLabel, d.readout);
+  dragsBox.append(row);
+  return d;
+});
+
+// Drive the drags at 20 Hz with a 50 ms glide, as the game would per step.
+setInterval(() => {
+  for (const d of drags) {
+    const p = dragParams(d);
+    d.readout.textContent = `${Number(d.speed.value).toFixed(2)} m/s ${d.force.value} N -> gain ${p.gain.toFixed(2)} pitch ${p.pitch.toFixed(2)}`;
+    if (d.handle)
+      audio.setLoopParams(
+        d.handle,
+        { gain: p.gain, pitch: p.pitch, position: near(2.5, 0.5) },
+        0.05,
+      );
+  }
+}, 50);
+
+// Pushes through the voice pool, at the game's 60 Hz step.
+const pool = createContactVoicePool();
+const pushHandles = new Map<string, LoopHandle>();
+let pushTimer = 0;
+let pushBodies: { input: ContactInput; v: number; decel: number }[] = [];
+
+function runPool(): void {
+  const dt = 1 / 60;
+  const contacts: ContactInput[] = [];
+  for (const b of pushBodies) {
+    b.v = Math.max(0, b.v - b.decel * dt);
+    if (b.v > 0)
+      contacts.push({
+        ...b.input,
+        slipSpeed: b.input.rollSpeed > 0 ? 0 : b.v,
+        rollSpeed: b.input.rollSpeed > 0 ? b.v : 0,
+      });
+  }
+  for (const c of pool.update(contacts, dt)) {
+    let h = pushHandles.get(c.key);
+    if (!h) {
+      h = audio.startLoop(c.sound, { gain: 0, position: c.position });
+      pushHandles.set(c.key, h);
+    }
+    audio.setLoopParams(
+      h,
+      {
+        gain: c.gain,
+        pitch: c.pitch,
+        position: c.position,
+        occlusion: occlusion(),
+      },
+      c.fade,
+    );
+  }
+  if (contacts.length === 0 && pool.voices().every((v) => v.body === null)) {
+    clearInterval(pushTimer);
+    pushTimer = 0;
+  }
+}
+
+function push(
+  bodies: {
+    material: ContactMaterial;
+    v: number;
+    decel: number;
+    force: number;
+    roll?: boolean;
+    x: number;
+  }[],
+): void {
+  void audio.resume().then(() => {
+    pushBodies = bodies.map((b, i) => ({
+      input: {
+        body: 100 + i + Math.floor(vary() * 1000),
+        material: b.material,
+        slipSpeed: 0,
+        rollSpeed: b.roll ? 1 : 0,
+        force: b.force,
+        position: near(3, b.x),
+      },
+      v: b.v,
+      decel: b.decel,
+    }));
+    if (!pushTimer) pushTimer = window.setInterval(runPool, 1000 / 60);
+    status.textContent = `voice pool: ${bodies.length} bodies`;
+  });
+}
+
+pushesBox.append(
+  button("push wooden crate", () =>
+    push([{ material: "wood", v: 1.4, decel: 1.2, force: 245, x: 0 }]),
+  ),
+  button("shove steel case", () =>
+    push([{ material: "metal", v: 0.9, decel: 0.9, force: 590, x: 0 }]),
+  ),
+  button("kick chair", () =>
+    push([{ material: "plastic", v: 2, decel: 3, force: 70, x: 0 }]),
+  ),
+  button("roll drum", () =>
+    push([
+      { material: "metal", v: 1.6, decel: 0.5, force: 345, roll: true, x: 0 },
+    ]),
+  ),
+  button("six things at once (pool of 4)", () =>
+    push([
+      { material: "wood", v: 1.4, decel: 1.0, force: 245, x: -2 },
+      { material: "wood", v: 0.6, decel: 0.6, force: 80, x: -1 },
+      { material: "metal", v: 1.0, decel: 0.8, force: 590, x: 0 },
+      { material: "plastic", v: 1.8, decel: 2.5, force: 70, x: 1 },
+      { material: "metal", v: 1.2, decel: 0.4, force: 345, roll: true, x: 2 },
+      { material: "wood", v: 0.3, decel: 0.5, force: 245, x: 3 },
+    ]),
+  ),
+);
+
+// New one-shots.
+function cue(sound: SoundId, options: PlayOptions = {}): void {
+  drawWave(sound);
+  play(sound, options);
+}
+const doorAt = (): Vec3 => near(3, 1.5);
+cuesBox.append(
+  button("timer tick", () =>
+    cue("timer_tick", { position: doorAt(), gain: 0.8 }),
+  ),
+  button("timer tick (urgent, pitch 1.2)", () =>
+    cue("timer_tick", { position: doorAt(), gain: 1, pitch: 1.2 }),
+  ),
+  button("countdown", () => {
+    drawWave("timer_tick");
+    // Ten ticks: seven a second apart, the last three faster and higher.
+    const times = [0, 1, 2, 3, 4, 5, 6, 7, 7.5, 8];
+    schedule(
+      times.map((at, i) => ({
+        at: at * 1000,
+        run: () =>
+          audio.play("timer_tick", {
+            position: doorAt(),
+            gain: i >= 7 ? 1 : 0.8,
+            pitch: i >= 7 ? 1.2 : 1,
+            occlusion: occlusion(),
+          }),
+      })),
+    );
+  }),
+  button("door blocked", () => cue("door_blocked", { position: doorAt() })),
+  button("objective", () => cue("objective")),
+);
+
+// Last, once every loop list above exists.
+syncOcclusion();

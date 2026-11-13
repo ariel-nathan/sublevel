@@ -83,6 +83,13 @@ const DURATION: Record<SoundId, [number, number]> = {
   hum_fluorescent: [5, 12.5],
   hum_machine: [5, 12.5],
   ambient_drone: [5, 12.5],
+  timer_tick: [0.03, 0.1],
+  door_blocked: [0.9, 1.3],
+  objective: [1.2, 1.7],
+  scrape_wood: [4, 8],
+  scrape_metal: [4, 8],
+  scrape_plastic: [4, 8],
+  roll_metal: [4, 8],
 };
 
 /**
@@ -289,10 +296,23 @@ describe("loudness targets", () => {
     expect(kLoudnessDb(render("crate_break"), 44100)).toBeGreaterThan(
       kLoudnessDb(render("impact_wood"), 44100) - 3,
     );
+    // Ambience sits below everything; contact loops (continuous) sit well
+    // under the impacts that start and end them, and above ambience.
     for (const id of LOOPING_SOUNDS) {
+      if (CATEGORY_OF[id] !== "ambience") continue;
       for (const other of SOUND_IDS) {
-        if (!LOOPS.has(other)) expect(level(id)).toBeLessThan(level(other));
+        if (!LOOPS.has(other) || CATEGORY_OF[other] === "contact")
+          expect(level(id)).toBeLessThan(level(other));
       }
+    }
+    for (const id of LOOPING_SOUNDS) {
+      if (CATEGORY_OF[id] !== "contact") continue;
+      for (const impact of [
+        "impact_wood",
+        "impact_metal",
+        "impact_plastic",
+      ] as const)
+        expect(level(id)).toBeLessThan(level(impact) - 8);
     }
   });
 
@@ -413,13 +433,19 @@ describe("design targets", () => {
     expect([100, 120]).toContain(best);
   });
 
+  /**
+   * Loudest 50 ms frame over the median frame, dB: hums must have no events
+   * at all; scrapes are eventful textures; the roll has soft knocks.
+   */
+  const spreadLimit = (id: SoundId) =>
+    id === "roll_metal" ? 12 : CATEGORY_OF[id] === "contact" ? 7.5 : 4;
   for (const id of LOOPING_SOUNDS) {
     test(`${id} does not expose its loop length`, () => {
       const stats = loopEnvelopeStats(render(id), 44100);
       // No swell once (or two or three times) per loop deeper than 5%...
       expect(stats.loopModulation).toBeLessThan(0.05);
       // ...and no discrete events standing out of the texture.
-      expect(stats.spreadDb).toBeLessThan(4);
+      expect(stats.spreadDb).toBeLessThan(spreadLimit(id));
     });
   }
 

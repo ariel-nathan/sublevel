@@ -103,6 +103,13 @@
       code {
         color: #ff9;
       }
+      .drag input[type="range"] {
+        width: 160px;
+      }
+      .drag .readout {
+        color: #8c8;
+        width: 340px;
+      }
     </style>
   </head>
   <body>
@@ -173,6 +180,49 @@
         <span id="distancev"></span
       ></label>
     </div>
+    <h4>room and occlusion</h4>
+    <p>
+      The room sets the reverb character (cross-faded over 0.4 s); the game
+      picks it from the level's acoustic zones. Occlusion applies to every loop
+      playing now (gliding) and to every one-shot played from now on: 0 is a
+      clear line of sight, 1 is behind walls (dull, -14 dB, relatively more
+      reverb).
+    </p>
+    <div>
+      <label
+        >room
+        <select id="room">
+          <option value="small">small (alcove)</option>
+          <option value="lab">lab</option>
+          <option value="corridor">corridor</option>
+          <option value="hall">hall (storage)</option>
+        </select></label
+      >
+      <label
+        >occlusion
+        <input
+          id="occlusion"
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0" />
+        <span id="occlusionv"></span
+      ></label>
+    </div>
+    <h4>contact loops: drag</h4>
+    <p>
+      Each row is a body sliding or rolling 2.5 m ahead. "drag" starts it; speed
+      (m/s) and contact force (N) drive <code>contactLoopParams</code>
+      live, exactly as the game will. Below 0.08 m/s it is silent. The push
+      buttons feed a simulated shove through the game's voice pool
+      (<code>createContactVoicePool</code>): speed jumps up, then friction
+      brings the body to rest.
+    </p>
+    <div id="drags"></div>
+    <div id="pushes" class="bar"></div>
+    <h4>new cues</h4>
+    <div id="cues" class="bar"></div>
     <div id="status"></div>
     <canvas id="wave" width="800" height="160"></canvas>
     <script type="module" src="../src/audio/demo.ts"></script>

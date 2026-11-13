@@ -37,6 +37,7 @@ import {
   type FixtureBox,
 } from "./fixtures";
 import { BUTTON_DEPTH, buildPropMeshes } from "./meshes";
+import { PLATE_SINK } from "./plates";
 
 const FIXED_DT = 1 / 60;
 const BUILT = buildLevel();
@@ -163,6 +164,8 @@ const EXTRA_ITEMS =
 /** Impact targets in the level: each adds a hazard-striped ring part. */
 const IMPACT_UNITS = LEVEL.buttons.filter((b) => b.mode === "impact").length;
 const PLATE = LEVEL.plates[0];
+/** The plate is flush: its box is a footprint on the floor at box.min.y. */
+const PLATE_FLOOR = PLATE.box.min.y;
 const PLATE_CENTRE = v3.scale(v3.add(PLATE.box.min, PLATE.box.max), 0.5);
 const DOOR_A = LEVEL.doors[0];
 const DOOR_B = LEVEL.doors[1];
@@ -470,7 +473,7 @@ describe("pressure plate", () => {
   const onPlate = (kind: PropKind): Vec3 =>
     v3.create(
       PLATE_CENTRE.x,
-      PLATE.box.max.y + restY(kind) + 0.001,
+      PLATE_FLOOR + restY(kind) + 0.001,
       PLATE_CENTRE.z,
     );
 
@@ -490,7 +493,7 @@ describe("pressure plate", () => {
     expect(ofType(down, "plate_down").length).toBe(1);
     const position = ofType(down, "plate_down")[0].position;
     expect(position.x).toBeCloseTo(PLATE_CENTRE.x, 3);
-    expect(position.y).toBeCloseTo(PLATE.box.max.y, 3);
+    expect(position.y).toBeCloseTo(PLATE_FLOOR, 3);
     expect(ofType(down, "door_open").length).toBe(1);
     rig.run(2);
     expect(doorwayBlocked(rig.physics, DOOR_B)).toBe(false);
@@ -528,22 +531,18 @@ describe("pressure plate", () => {
     );
     rig.run(1);
     const sunk = plateY();
-    expect(rest[0] - sunk[0]).toBeCloseTo(0.025, 3);
+    expect(rest[0] - sunk[0]).toBeCloseTo(PLATE_SINK, 4);
   });
 
   test("a 25 kg crate is not enough; a stack of two is", () => {
     const rig = plateRig([
-      prop("crate_wood", PLATE_CENTRE.x, PLATE.box.max.y + 0.4, PLATE_CENTRE.z),
+      prop("crate_wood", PLATE_CENTRE.x, PLATE_FLOOR + 0.4, PLATE_CENTRE.z),
     ]);
     expect(rig.run(2).length).toBe(0);
     expect(doorwayBlocked(rig.physics, DOOR_B)).toBe(true);
     // Drop a second crate on top.
     rig.physics.addBody({
-      position: v3.create(
-        PLATE_CENTRE.x,
-        PLATE.box.max.y + 1.25,
-        PLATE_CENTRE.z,
-      ),
+      position: v3.create(PLATE_CENTRE.x, PLATE_FLOOR + 1.25, PLATE_CENTRE.z),
       halfExtents: PROP_SPECS.crate_wood.halfExtents,
       mass: 25,
     });
@@ -554,14 +553,10 @@ describe("pressure plate", () => {
   test("the player standing on it presses it", () => {
     const rig = plateRig([]);
     const box: Aabb = {
-      min: v3.create(
-        PLATE_CENTRE.x - 0.3,
-        PLATE.box.max.y,
-        PLATE_CENTRE.z - 0.3,
-      ),
+      min: v3.create(PLATE_CENTRE.x - 0.3, PLATE_FLOOR, PLATE_CENTRE.z - 0.3),
       max: v3.create(
         PLATE_CENTRE.x + 0.3,
-        PLATE.box.max.y + 1.8,
+        PLATE_FLOOR + 1.8,
         PLATE_CENTRE.z + 0.3,
       ),
     };
@@ -569,8 +564,8 @@ describe("pressure plate", () => {
     expect(ofType(events, "plate_down").length).toBe(1);
     // Jumping well off the plate (feet more than 8 cm above) releases it.
     const jumping: Aabb = {
-      min: v3.create(box.min.x, PLATE.box.max.y + 0.5, box.min.z),
-      max: v3.create(box.max.x, PLATE.box.max.y + 2.3, box.max.z),
+      min: v3.create(box.min.x, PLATE_FLOOR + 0.5, box.min.z),
+      max: v3.create(box.max.x, PLATE_FLOOR + 2.3, box.max.z),
     };
     const later = rig.run(1, { box: jumping, mass: 80 });
     expect(ofType(later, "plate_up").length).toBe(1);
@@ -593,6 +588,155 @@ describe("pressure plate", () => {
     rig.run(1);
     expect(ofType(rig.events, "plate_down").length).toBe(0);
     expect(ofType(rig.events, "door_open").length).toBe(0);
+  });
+
+  test("the plate has no collider: a body rests on the floor through it", () => {
+    const rig = plateRig([
+      prop(
+        "crate_wood",
+        PLATE_CENTRE.x,
+        restY("crate_wood") + 0.3,
+        PLATE_CENTRE.z,
+      ),
+    ]);
+    rig.run(1.5);
+    const crate = rig.physics.bodies()[0];
+    expect(crate.position.y).toBeCloseTo(restY("crate_wood"), 2);
+    // Nothing static stands in the plate's footprint above the floor.
+    const refs = rig.physics.overlapBox({
+      min: v3.create(PLATE.box.min.x + 0.1, 0.003, PLATE.box.min.z + 0.1),
+      max: v3.create(PLATE.box.max.x - 0.1, 0.5, PLATE.box.max.z - 0.1),
+    });
+    expect(refs.filter((r) => r.kind === "static")).toEqual([]);
+  });
+
+  test("a carried crate set down on it, and a second on top, press it", () => {
+    const rig = plateRig([
+      prop("crate_wood", 9.5, restY("crate_wood"), 9.5),
+      prop("crate_wood", 9.5, restY("crate_wood") + 2, 9.0),
+    ]);
+    const [a, b] = rig.physics.bodies().map((x) => x.id);
+    // Let go 5 cm above the floor, as the carry does.
+    rig.physics.setBodyPose(a, {
+      x: PLATE_CENTRE.x,
+      y: restY("crate_wood") + 0.05,
+      z: PLATE_CENTRE.z,
+    });
+    expect(ofType(rig.run(1.5), "plate_down").length).toBe(0);
+    rig.physics.setBodyPose(b, {
+      x: PLATE_CENTRE.x,
+      y: 3 * restY("crate_wood") + 0.05,
+      z: PLATE_CENTRE.z,
+    });
+    expect(ofType(rig.run(1.5), "plate_down").length).toBe(1);
+  });
+
+  /** The player's box for a feet position, as the game builds it. */
+  const boxAt = (p: Vec3): Aabb => ({
+    min: v3.create(p.x - PLAYER.halfWidth, p.y, p.z - PLAYER.halfWidth),
+    max: v3.create(
+      p.x + PLAYER.halfWidth,
+      p.y + PLAYER.standHeight,
+      p.z + PLAYER.halfWidth,
+    ),
+  });
+
+  test("a character standing on the floor over it presses it", () => {
+    const rig = plateRig([]);
+    const events = rig.run(1, {
+      box: boxAt(v3.create(PLATE_CENTRE.x, PLATE_FLOOR, PLATE_CENTRE.z)),
+      mass: 80,
+    });
+    expect(ofType(events, "plate_down").length).toBe(1);
+  });
+
+  test("a 60 kg crate pushed by the character from 2 m away ends on the plate and presses it", () => {
+    const half = {
+      x: PLAYER.halfWidth,
+      y: PLAYER.standHeight / 2,
+      z: PLAYER.halfWidth,
+    };
+    const crateHalf = PROP_SPECS.crate_metal.halfExtents;
+    const rig = plateRig([
+      prop(
+        "crate_metal",
+        PLATE_CENTRE.x,
+        crateHalf.y,
+        PLATE.box.min.z - 2 - crateHalf.z,
+      ),
+    ]);
+    const crate = rig.physics.bodies()[0].id;
+    // The character starts just behind the crate and walks south-to-north
+    // (+z) at run speed until the crate is on the plate, then stops.
+    let pos = v3.create(
+      PLATE_CENTRE.x,
+      half.y,
+      PLATE.box.min.z - 2 - crateHalf.z * 2 - half.z - 0.05,
+    );
+    let vy = 0;
+    let slowest = Infinity;
+    let crossed = false;
+    for (let i = 0; i < 60 * 14; i++) {
+      const c = rig.physics.getBody(crate)!;
+      const onPlate = c.position.z > PLATE_CENTRE.z - 0.2;
+      const walk = onPlate ? 0 : 3.5;
+      vy -= 9.81 * FIXED_DT;
+      const r = rig.physics.moveCharacter(
+        pos,
+        half,
+        v3.create(0, vy, walk),
+        FIXED_DT,
+        {},
+      );
+      pos = r.position;
+      vy = r.velocity.y;
+      const before = c.position.z;
+      rig.stepOnce({
+        box: boxAt(v3.create(pos.x, pos.y - half.y, pos.z)),
+        mass: 80,
+      });
+      const after = rig.physics.getBody(crate)!;
+      if (
+        walk > 0 &&
+        before > PLATE.box.min.z - 0.5 &&
+        before < PLATE.box.min.z + 0.5
+      ) {
+        crossed = true;
+        slowest = Math.min(slowest, after.linearVelocity.z);
+      }
+    }
+    expect(crossed).toBe(true);
+    // The crate does not stall at the plate's edge.
+    expect(slowest).toBeGreaterThan(0.15);
+    const end = rig.physics.getBody(crate)!;
+    expect(end.position.z).toBeGreaterThan(PLATE.box.min.z + 0.4);
+    expect(end.position.z).toBeLessThan(PLATE.box.max.z);
+    expect(ofType(rig.events, "plate_down").length).toBe(1);
+  });
+
+  test("a prop sliding across the plate loses no speed at its edges", () => {
+    const h = PROP_SPECS.crate_wood.halfExtents;
+    const lane = (z: number): PropSpawn =>
+      prop("crate_wood", PLATE.box.min.x - 1.5, h.y, z);
+    // One lane over the plate, one over bare floor of the same room.
+    const rig = plateRig([lane(PLATE_CENTRE.z), lane(PLATE.box.min.z - 1.6)]);
+    const [onPlate, bare] = rig.physics.bodies().map((b) => b.id);
+    for (const id of [onPlate, bare]) {
+      rig.physics.setBodyPose(id, rig.physics.getBody(id)!.position);
+    }
+    const speed = 3;
+    // Give both the same push by hand (a velocity on spawn is not in PropSpawn).
+    rig.physics.setBodyVelocity(onPlate, v3.create(speed, 0, 0));
+    rig.physics.setBodyVelocity(bare, v3.create(speed, 0, 0));
+    const a: number[] = [];
+    const b: number[] = [];
+    for (let i = 0; i < 90; i++) {
+      rig.stepOnce();
+      a.push(rig.physics.getBody(onPlate)!.linearVelocity.x);
+      b.push(rig.physics.getBody(bare)!.linearVelocity.x);
+    }
+    expect(a[0]).toBeGreaterThan(speed * 0.8);
+    a.forEach((v, i) => expect(Math.abs(v - b[i])).toBeLessThan(0.02));
   });
 
   test("a button on a plate-controlled door is denied", () => {

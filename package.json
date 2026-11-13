@@ -8,6 +8,9 @@
     "e2e": "bun tools/e2e.ts",
     "solve": "bun tools/solve.ts",
     "tour": "bun tools/tour.ts",
+    "fuzz": "bun tools/solve.ts --count 20 --from 1 --parallel 4",
+    "check-seed": "bun tools/check-seed.ts",
+    "map": "bun tools/map.ts",
     "dist": "bun build --compile --target=browser ./index.html --outdir=dist"
   },
   "devDependencies": {

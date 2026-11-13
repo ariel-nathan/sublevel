@@ -283,3 +283,65 @@ export function throwPitch(
   }
   return (lo + hi) / 2;
 }
+
+/**
+ * Where a held prop hangs: `distance` metres (eye to centre) along the view
+ * (yaw and pitch in degrees), HOLD_LOWER below the line of sight
+ * (src/player/tuning.ts).
+ */
+export function holdPoint(
+  eye: Point3,
+  look: Look,
+  distance: number,
+  lower = 0.15,
+): Point3 {
+  const { forward } = viewBasis(look);
+  return {
+    x: eye.x + forward.x * distance,
+    y: eye.y + forward.y * distance - lower,
+    z: eye.z + forward.z * distance,
+  };
+}
+
+export interface ThrowPlan {
+  look: Look;
+  /** Where the prop hangs (and so is released) with that look. */
+  release: Point3;
+}
+
+/**
+ * The view to throw with from `eye` so that a prop of `speed` hanging
+ * `holdDistance` ahead passes through `target`: the pitch moves the hold
+ * point, which moves the arc, so it is iterated to a fixed point. `lift`
+ * aims that far above the target. Null if the target is out of range.
+ */
+export function planThrow(
+  eye: Point3,
+  target: Point3,
+  speed: number,
+  holdDistance: number,
+  lift = 0,
+  up = 1.0,
+): ThrowPlan | null {
+  const yawDeg = lookToward(eye, { x: target.x, y: eye.y, z: target.z }).yawDeg;
+  let pitchDeg = 20;
+  let release = holdPoint(eye, { yawDeg, pitchDeg }, holdDistance);
+  for (let i = 0; i < 30; i++) {
+    const solved = throwPitch(
+      horizontalDistance(release, target),
+      target.y + lift - release.y,
+      speed,
+      up,
+    );
+    if (solved === null) {
+      return null;
+    }
+    const moved = Math.abs(solved - pitchDeg);
+    pitchDeg = solved;
+    release = holdPoint(eye, { yawDeg, pitchDeg }, holdDistance);
+    if (moved < 1e-4) {
+      break;
+    }
+  }
+  return { look: { yawDeg, pitchDeg }, release };
+}

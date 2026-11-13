@@ -1,16 +1,27 @@
 import type { Aabb, BodyState, PressurePlateDef } from "../core/api";
 import { v3, type Vec3 } from "../math";
 
+/**
+ * A plate is flush with the floor: it has no collider, props and the player
+ * rest on the floor through it, and it is drawn as a thin inlay a few
+ * millimetres proud. `PressurePlateDef.box` is read as a footprint (x and z
+ * extents) standing on the floor surface `box.min.y`; its height (`max.y`)
+ * is ignored.
+ */
+export function plateFloor(box: Aabb): number {
+  return box.min.y;
+}
+
 /** The footprint is shrunk by this much so edge-sitters do not count. */
 export const PLATE_INSET = 0.05;
-/** Highest a body's underside may be above the plate and still count. */
+/** Highest a body's underside may be above the floor at the plate and still count. */
 export const PLATE_STACK_HEIGHT = 1.3;
-/** Player feet must be this close to the plate top to weigh it down. */
+/** Player feet must be this close to the plate (the floor) to weigh it down. */
 export const PLATE_PLAYER_REACH = 0.08;
 /** A state change must persist this long before it takes effect. */
 export const PLATE_DEBOUNCE = 0.15;
-/** How far a pressed plate is drawn sunk, and how fast it moves. */
-export const PLATE_SINK = 0.025;
+/** How far a pressed plate is drawn sunk (it stays 4 mm proud), and how fast. */
+export const PLATE_SINK = 0.002;
 const PLATE_SINK_SPEED = 0.2;
 
 /** Half the height of a body's bounding box (from its orientation). */
@@ -34,13 +45,14 @@ export function plateLoad(
   const x1 = box.max.x - PLATE_INSET;
   const z0 = box.min.z + PLATE_INSET;
   const z1 = box.max.z - PLATE_INSET;
-  const top = box.max.y;
+  const top = plateFloor(box);
   let load = 0;
   for (const body of bodies) {
     const p = body.position;
     if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) {
       continue;
     }
+    // A body resting on the floor has its centre above it.
     if (p.y < top) {
       continue;
     }
@@ -64,7 +76,6 @@ export function plateLoad(
 
 export class Plate {
   readonly def: PressurePlateDef;
-  readonly colliderId: number;
   readonly center: Vec3;
   pressed = false;
   load = 0;
@@ -73,10 +84,13 @@ export class Plate {
   prevSink = 0;
   private pending = 0;
 
-  constructor(def: PressurePlateDef, colliderId: number) {
+  constructor(def: PressurePlateDef) {
     this.def = def;
-    this.colliderId = colliderId;
-    this.center = v3.scale(v3.add(def.box.min, def.box.max), 0.5);
+    this.center = v3.create(
+      (def.box.min.x + def.box.max.x) / 2,
+      plateFloor(def.box),
+      (def.box.min.z + def.box.max.z) / 2,
+    );
   }
 
   /**

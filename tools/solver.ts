@@ -11,13 +11,18 @@
  *          to its press spot first if it is out of reach; fails without a
  *          `button_press` event.
  *   carry  walk up to the prop (spawn index) and pick it up, then set it
- *          down as `carryPlan` says; fails unless it rests within
- *          CARRY_TOLERANCE of the target.
+ *          down as `carryPlan` says (or standing at `from` and releasing
+ *          at height `holdY`, when the step gives them); fails unless it
+ *          rests within CARRY_TOLERANCE of the target.
  *   push   stand behind the prop and walk into it, re-approaching as
  *          needed; fails unless it rests within PUSH_TOLERANCE.
- *   throw  fetch the prop, come back to where the step began and throw it
- *          at the point with the ballistic solver; up to 3 tries, each
- *          confirmed by a `button_press` event within 1 m of the point.
+ *   throw  fetch the prop, come back to where the step began (or to
+ *          `from`) and throw it at the point with the ballistic solver
+ *          (pilot.throwAt: the prop is let settle in the hand and the pitch is
+ *          solved from where it hangs); up to 3 tries, each confirmed by a
+ *          `button_press` event within 1 m of the point. Retries aim a little
+ *          higher and lower (THROW_LIFTS) because a tumbling crate that grazes
+ *          the target's rim does not count.
  *   wait   until the event has happened, counting from the start of the
  *          previous step (so a wait right after the step that causes the
  *          event does not miss it).
@@ -30,6 +35,8 @@ import {
   canPress,
   carryPlan,
   fetchPoint,
+  HOLD_LOWER,
+  holdDistance,
   pressStand,
   PUSH_TOLERANCE,
   pushApproach,
@@ -40,6 +47,9 @@ import { horizontalDistance, type Point3 } from "./pilot-math";
 
 const f = (n: number) => n.toFixed(2);
 
+/** How much higher (m) each successive throw aims than the target. */
+const THROW_LIFTS = [0, 0.1, -0.1];
+
 export function describeStep(s: SolutionStep): string {
   switch (s.do) {
     case "walk":
@@ -47,13 +57,19 @@ export function describeStep(s: SolutionStep): string {
     case "press":
       return `press ${s.button}`;
     case "carry":
-      return `carry prop ${s.prop} to (${f(s.to.x)}, ${f(s.to.y)}, ${f(s.to.z)})`;
+      return `carry prop ${s.prop} to (${f(s.to.x)}, ${f(s.to.y)}, ${f(s.to.z)})${
+        s.from ? ` from (${f(s.from.x)}, ${f(s.from.z)})` : ""
+      }${s.holdY === undefined ? "" : ` at height ${f(s.holdY)}`}`;
     case "push":
       return `push prop ${s.prop} to (${f(s.to.x)}, ${f(s.to.z)})`;
     case "throw":
-      return `throw prop ${s.prop} at (${f(s.at.x)}, ${f(s.at.y)}, ${f(s.at.z)})`;
+      return `throw prop ${s.prop} at (${f(s.at.x)}, ${f(s.at.y)}, ${f(s.at.z)})${
+        s.from ? ` from (${f(s.from.x)}, ${f(s.from.z)})` : ""
+      }`;
     case "wait":
-      return `wait for ${s.for} (${s.seconds} s)`;
+      return s.for === undefined
+        ? `wait ${s.seconds} s`
+        : `wait for ${s.for} (${s.seconds} s)`;
   }
 }
 
@@ -120,11 +136,11 @@ export class Solver {
       case "press":
         return this.press(step.button);
       case "carry":
-        return this.carry(step.prop, step.to);
+        return this.carry(step.prop, step.to, step.from, step.holdY);
       case "push":
         return this.push(step.prop, step.to);
       case "throw":
-        return this.throwAt(step.prop, step.at);
+        return this.throwAt(step.prop, step.at, step.from);
       case "wait":
         if (step.for === undefined) {
           // A plain delay.
@@ -246,25 +262,37 @@ export class Solver {
     return this.pilot.pickUp(id);
   }
 
-  private async carry(prop: number, to: Point3): Promise<string | null> {
+  private async carry(
+    prop: number,
+    to: Point3,
+    stand?: { x: number; z: number },
+    holdY?: number,
+  ): Promise<string | null> {
     const from = (await this.pilot.state()).player.feet;
     if (!(await this.fetch(prop))) return "could not pick it up";
-    const plan = carryPlan(
-      this.level.props[prop].kind,
+    const kind = this.level.props[prop].kind;
+    const auto = carryPlan(
+      kind,
       from,
       to,
       await this.clearNow(this.bodyOf[prop]),
       this.plates,
       from.y,
     );
-    if (!plan) return "no clear way to set it down";
-    const rest = await this.pilot.setDown(
-      to.x,
-      to.y,
-      to.z,
-      plan.stand,
-      plan.pitchDeg,
-    );
+    if (!auto && (stand === undefined || holdY === undefined)) {
+      return "no clear way to set it down";
+    }
+    // The step's own spot and release height win over the planned ones.
+    const at = stand ?? auto!.stand;
+    const release = holdY ?? auto!.holdY;
+    let pitchDeg = auto?.pitchDeg ?? 0;
+    if (stand !== undefined || holdY !== undefined) {
+      const eyeY = from.y + PLAYER.eyeHeight;
+      const sin = (release + HOLD_LOWER - eyeY) / holdDistance(kind);
+      if (sin < -1 || sin > 1) return "the release height is out of reach";
+      pitchDeg = (Math.asin(sin) * 180) / Math.PI;
+    }
+    const rest = await this.pilot.setDown(to.x, to.y, to.z, at, pitchDeg);
     if (!rest) return "could not set it down";
     const off = horizontalDistance(rest, to);
     return off <= CARRY_TOLERANCE && Math.abs(rest.y - to.y) < 0.3
@@ -286,16 +314,26 @@ export class Solver {
       : `it stopped ${end ? f(horizontalDistance(end, to)) : "?"} m short`;
   }
 
-  private async throwAt(prop: number, at: Point3): Promise<string | null> {
-    const from = (await this.pilot.state()).player.feet;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+  private async throwAt(
+    prop: number,
+    at: Point3,
+    stand?: { x: number; z: number },
+  ): Promise<string | null> {
+    const from = stand ?? (await this.pilot.state()).player.feet;
+    for (let attempt = 1; attempt <= THROW_LIFTS.length; attempt++) {
       if (!(await this.fetch(prop))) return "could not pick it up";
       const here = (await this.pilot.state()).player.feet;
       if (horizontalDistance(here, from) > 0.15 && !(await this.walk(from))) {
         return "could not get back to the throwing spot";
       }
       const mark = (await this.pilot.state()).step;
-      await this.pilot.throwAt(at.x, at.y, at.z);
+      const aimed = await this.pilot.throwAt(
+        at.x,
+        at.y,
+        at.z,
+        THROW_LIFTS[attempt - 1],
+      );
+      if (!aimed) return "the target is out of range";
       const hit = await this.pilot.waitForEvent(
         "a hit near the target",
         (e: PilotEvent) => {
@@ -312,7 +350,7 @@ export class Solver {
       if (hit) return null;
       this.pilot.log(`throw ${attempt} missed`);
     }
-    return "three throws missed";
+    return `${THROW_LIFTS.length} throws missed`;
   }
 
   private async wait(type: string, seconds: number): Promise<string | null> {

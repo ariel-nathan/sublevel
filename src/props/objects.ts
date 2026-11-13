@@ -239,11 +239,8 @@ class WorldObjectsImpl implements WorldObjects {
 
   private buildPlates(defs: readonly PressurePlateDef[]): void {
     for (const def of defs) {
-      const colliderId = this.physics.addStatic({
-        min: v3.clone(def.box.min),
-        max: v3.clone(def.box.max),
-      });
-      const plate = new Plate(def, colliderId);
+      // No collider: the plate is flush with the floor (see plates.ts).
+      const plate = new Plate(def);
       const matrix = mat4.identity();
       const handles = this.register(
         buildPlateMeshes(v3.sub(def.box.max, def.box.min)),
@@ -613,11 +610,7 @@ class WorldObjectsImpl implements WorldObjects {
       if (change !== 0) {
         events.push({
           type: change > 0 ? "plate_down" : "plate_up",
-          position: v3.create(
-            plate.center.x,
-            plate.def.box.max.y,
-            plate.center.z,
-          ),
+          position: v3.create(plate.center.x, plate.center.y, plate.center.z),
         });
       }
     }

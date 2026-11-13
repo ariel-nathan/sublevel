@@ -3,6 +3,12 @@
  * states) and writes one PNG per view plus labelled contact sheets.
  *
  *   bun run tour [--only <substring>] [--view <debugView>] [--out <dir>]
+ *   bun run tour --seed N | --rooms a,b [--auto] [...]
+ *
+ * Without --seed/--rooms the fixed table VIEWS (views.ts, hand-built level) is
+ * used. With either (or --auto) the viewpoints are derived from the level
+ * (auto-views.ts) and the sheets are per room (sheet-z03.png ...), then
+ * sheet-doors.png and sheet-targets.png; output goes to out/tour/<tag>/.
  *   bun run tour --diff <dirA> <dirB> [--out <dir>]
  *
  * --diff compares two earlier tour outputs view by view and writes diff
@@ -10,8 +16,17 @@
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { DebugView } from "../src/core/api";
-import { launchGame } from "./browser";
+import type { DebugView, LevelData } from "../src/core/api";
+import { autoViews } from "./auto-views";
+import { openAllDoors } from "./doors";
+import {
+  isSelected,
+  levelQuery,
+  levelSelector,
+  levelTag,
+  type LevelSelector,
+} from "./level-args";
+import { launchGame, type GameSession } from "./browser";
 import { parseArgs } from "./cli";
 import {
   contactSheets,
@@ -31,6 +46,7 @@ import {
   selectViews,
   setDebugView,
   setPose,
+  type Viewpoint,
 } from "./views";
 
 const DEBUG_VIEWS: DebugView[] = [
@@ -46,18 +62,67 @@ async function savePng(path: string, image: Image): Promise<void> {
   await writePng(path, image.width, image.height, image.rgba);
 }
 
+/** Which contact-sheet group an automatic viewpoint belongs to. */
+export function groupOf(name: string): string {
+  const room = /^(z\d+)-/.exec(name);
+  if (room) return room[1];
+  return name.startsWith("door-") ? "doors" : "targets";
+}
+
 async function tour(
   only: string | undefined,
   debugView: DebugView,
   out: string,
+  sel: LevelSelector,
+  auto: boolean,
 ): Promise<void> {
-  const views = selectViews(VIEWS, only);
-  if (views.length === 0) {
-    throw new Error(`no viewpoint matches "${only}"`);
-  }
-  const session = await launchGame();
+  const session = await launchGame({ query: levelQuery(sel) });
   try {
+    const result = await runTour(session, only, debugView, out, auto);
+    if (result.errors.length > 0) {
+      console.log(`\nconsole errors:\n${result.errors.join("\n")}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await session.close();
+  }
+}
+
+export interface TourResult {
+  frames: number;
+  sheets: string[];
+  /** Doors that could not be opened (automatic tours). */
+  notOpened: string[];
+  /** Console errors from the page. */
+  errors: string[];
+}
+
+/** Renders the tour on an existing session (see the file header). */
+export async function runTour(
+  session: GameSession,
+  only: string | undefined,
+  debugView: DebugView,
+  out: string,
+  auto: boolean,
+  quiet = false,
+): Promise<TourResult> {
+  const notOpened: string[] = [];
+  const sheetPaths: string[] = [];
+  const log = (text: string): void => {
+    if (!quiet) console.log(text);
+  };
+  {
     const pilot = new Pilot(session, { run: "tour", outDir: "out" });
+    let all: readonly Viewpoint[] = VIEWS;
+    if (auto) {
+      const level = await session.evaluate<LevelData>("__game.level.data");
+      all = autoViews(level);
+      log(`automatic viewpoints: ${all.length} for "${level.name}"`);
+    }
+    const views = selectViews(all, only);
+    if (views.length === 0) {
+      throw new Error(`no viewpoint matches "${only}"`);
+    }
     const items: { image: Image; label: string }[] = [];
     const lines: string[] = [];
     const capture = async (name: string, index: number): Promise<void> => {
@@ -78,39 +143,61 @@ async function tour(
       }
     }
     if (views.some((v) => v.doors === "open")) {
-      await openDoors(pilot);
+      if (auto) {
+        const report = await openAllDoors(session);
+        notOpened.push(...report.failed.map((f) => f.door));
+        log(
+          `doors open: ${report.open.length}/${report.open.length + report.failed.length}` +
+            (report.failed.length > 0
+              ? `; NOT opened: ${report.failed.map((f) => f.door).join(", ")}`
+              : ""),
+        );
+      } else {
+        await openDoors(pilot);
+      }
       for (const [index, view] of views.entries()) {
         if (view.doors === "open") {
           await capture(view.name, index);
         }
       }
     }
-    const sheets = contactSheets(items, { cols: 3, rows: 4 });
-    const written: string[] = [];
-    for (const [i, sheet] of sheets.entries()) {
-      const path = join(out, `sheet-${i + 1}.png`);
-      await savePng(path, sheet.image);
-      written.push(path);
+    // Sheets: the hand-built tour keeps one running series; automatic tours
+    // get one set of sheets per room, then the doors, then buttons/plates/exit.
+    const groups = new Map<string, number[]>();
+    for (const [index, view] of views.entries()) {
+      const key = auto ? groupOf(view.name) : "";
+      groups.set(key, [...(groups.get(key) ?? []), index]);
     }
-    console.log(`view: ${debugView}   frames: ${views.length}   out: ${out}`);
-    console.log("");
-    for (const [i, sheet] of sheets.entries()) {
-      console.log(
-        `sheet-${i + 1}.png (${sheet.image.width}x${sheet.image.height}), left to right, top to bottom:`,
+    log(`view: ${debugView}   frames: ${views.length}   out: ${out}`);
+    log("");
+    for (const [key, indices] of groups) {
+      const sheets = contactSheets(
+        indices.map((i) => items[i]),
+        { cols: 3, rows: 4 },
       );
-      for (const index of sheet.items) {
-        console.log(`  ${lines[index]}`);
+      for (const [i, sheet] of sheets.entries()) {
+        const suffix = key === "" ? "" : `-${key}`;
+        const more = key === "" || sheets.length > 1 ? `-${i + 1}` : "";
+        const path = join(out, `sheet${suffix}${more}.png`);
+        await savePng(path, sheet.image);
+        sheetPaths.push(path);
+        log(
+          `${path} (${sheet.image.width}x${sheet.image.height}), left to right, top to bottom:`,
+        );
+        for (const index of sheet.items) {
+          log(`  ${lines[indices[index]]}`);
+        }
       }
     }
     const errors = session.consoleLines.filter((line) =>
       /^(exception|error)/.test(line),
     );
-    if (errors.length > 0) {
-      console.log(`\nconsole errors:\n${errors.join("\n")}`);
-      process.exitCode = 1;
-    }
-  } finally {
-    await session.close();
+    return {
+      frames: views.length,
+      sheets: sheetPaths,
+      notOpened,
+      errors,
+    };
   }
 }
 
@@ -190,7 +277,7 @@ async function diffTours(
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2), ["diff"]);
+  const args = parseArgs(process.argv.slice(2), ["diff", "auto"]);
   if (args.options.has("diff")) {
     const [a, b] = args.positional;
     if (!a || !b) {
@@ -203,20 +290,26 @@ async function main(): Promise<void> {
   if (!DEBUG_VIEWS.includes(debugView)) {
     throw new Error(`--view must be one of ${DEBUG_VIEWS.join(", ")}`);
   }
+  const sel = levelSelector(args);
+  const auto = args.options.has("auto") || isSelected(sel);
   await tour(
     args.options.get("only"),
     debugView,
-    args.options.get("out") ?? "out/tour",
+    args.options.get("out") ??
+      (isSelected(sel) ? `out/tour/${levelTag(sel)}` : "out/tour"),
+    sel,
+    auto,
   );
 }
 
-main().then(
-  () => process.exit(process.exitCode ?? 0),
-  (error) => {
-    console.error(
-      "tour failed:",
-      error instanceof Error ? error.message : error,
-    );
-    process.exit(1);
-  },
-);
+if (import.meta.main)
+  main().then(
+    () => process.exit(process.exitCode ?? 0),
+    (error) => {
+      console.error(
+        "tour failed:",
+        error instanceof Error ? error.message : error,
+      );
+      process.exit(1);
+    },
+  );

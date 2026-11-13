@@ -58,13 +58,21 @@ const f = (n: number) => n.toFixed(2);
 
 /** How much higher (m) each successive throw aims than the target. */
 const THROW_LIFTS = [0, 0.1, -0.1];
-/** Tries of one climb. */
-const CLIMB_TRIES = 3;
 /**
- * A climbing player keeps this far (plus its half-width) from the edge of
- * the surface it climbs onto until its feet are up at that height.
+ * One per try of a climb: a climbing player moves in at `crawl` (of full
+ * forward input) once within `margin` (plus its half-width) of the edge of
+ * the surface it climbs onto, until its feet are within `rise` of that
+ * height. Holding back keeps it from running into the side of a stacked
+ * crate and shoving it off; air control is weak, so a wide gap needs some
+ * momentum: later tries first back off `backUp` along the line (staying on
+ * the surface underfoot) for a longer run-up.
  */
-const CLIMB_MARGIN = 0.12;
+const CLIMB_STYLES = [
+  { margin: 0.12, rise: 0.05, crawl: 0, backUp: 0 },
+  { margin: 0.12, rise: 0.05, crawl: 0.5, backUp: 0.35 },
+  { margin: 0, rise: 0.2, crawl: 1, backUp: 0.35 },
+];
+const CLIMB_TRIES = CLIMB_STYLES.length;
 /** Props tried to fetch for one throw (the step's, then others nearby). */
 const FETCH_CANDIDATES = 4;
 
@@ -382,40 +390,97 @@ export class Solver {
         });
         f = (await this.pilot.state()).player.feet;
       }
+      // Settle first: a jump pressed straight after landing, or while a
+      // crate underfoot still rocks (not on the ground), is not taken.
+      await this.pilot.wait(8);
+      for (let i = 0; i < 20; i++) {
+        if ((await this.pilot.state()).player.onGround) break;
+        await this.pilot.wait(3);
+      }
+      f = (await this.pilot.state()).player.feet;
+      const { backUp } = CLIMB_STYLES[attempt - 1];
+      if (backUp > 0) {
+        // A longer run-up: back off along the line, staying on the surface
+        // the feet are on (a crate's top).
+        const d0 = horizontalDistance(f, to) || 1;
+        const away = {
+          x: f.x + ((f.x - to.x) / d0) * 2,
+          y: f.y,
+          z: f.z + ((f.z - to.z) / d0) * 2,
+        };
+        const room = (await this.edgeDistance({ ...f }, away)) - 0.12;
+        const back = Math.min(backUp, room);
+        if (back > 0.05) {
+          await this.pilot.walkTo(
+            f.x + ((f.x - to.x) / d0) * back,
+            f.z + ((f.z - to.z) / d0) * back,
+            { direct: true, tolerance: 0.06 },
+          );
+          await this.pilot.wait(10);
+          f = (await this.pilot.state()).player.feet;
+        }
+      }
       const yaw = (Math.atan2(-(to.x - f.x), -(to.z - f.z)) * 180) / Math.PI;
       await this.pilot.look(yaw, -20, true);
       // Forward while far; near the surface (its edge plus the body's
       // half-width) only once the feet are up to its height, so that the
       // body does not run into its side (and shove a stacked crate off) on
       // the way up.
-      const hold =
-        (await this.edgeDistance(to, f)) + PLAYER.halfWidth + CLIMB_MARGIN;
+      // Later tries hold back less: closer, and moving in a little earlier.
+      const { margin, rise, crawl } = CLIMB_STYLES[attempt - 1];
+      const hold = (await this.edgeDistance(to, f)) + PLAYER.halfWidth + margin;
       const forward = (d: number, y: number): number =>
-        y >= to.y - 0.05 ? (d > 0.3 ? 1 : 0) : d > hold ? 1 : 0;
+        y >= to.y - rise ? (d > 0.3 ? 1 : 0) : d > hold ? 1 : crawl;
+      if (CLIMB_STYLES[attempt - 1].backUp > 0) {
+        // Run the run-up on the ground, jumping at its end (a jump from a
+        // standstill keeps almost no speed in the air).
+        const d0 = horizontalDistance(f, to);
+        for (let i = 0; i < 30; i++) {
+          const s = await this.pilot.state();
+          if (horizontalDistance(s.player.feet, to) <= d0 - backUp) break;
+          await this.session.evaluate(`__harness.step(1, {"moveZ":1})`);
+        }
+        f = (await this.pilot.state()).player.feet;
+      }
       await this.session.evaluate(
         `__harness.step(1, {"moveZ":${forward(horizontalDistance(f, to), f.y)},"jump":true})`,
       );
+      let top = f.y;
+      let closest = horizontalDistance(f, to);
       for (let i = 0; i < 60; i++) {
         const s = await this.pilot.state();
         const d = horizontalDistance(s.player.feet, to);
+        top = Math.max(top, s.player.feet.y);
+        closest = Math.min(closest, d);
+        if (process.env.CLIMB_TRACE)
+          this.pilot.log(
+            `  ${[s.player.feet.x, s.player.feet.y, s.player.feet.z, d].map((v) => v.toFixed(2)).join(" ")} ground ${s.player.onGround}`,
+          );
         if (i > 4 && s.player.onGround) break;
         await this.session.evaluate(
           `__harness.step(2, {"moveZ":${forward(d, s.player.feet.y)}})`,
         );
       }
+      // Let a running landing come to rest before walking onto the spot.
+      await this.pilot.wait(6);
       const now = (await this.pilot.state()).player.feet;
       if (now.y > to.y - 0.2) {
         const walked = await this.pilot.walkTo(to.x, to.z, {
           direct: true,
           tolerance: 0.15,
         });
+        const after = (await this.pilot.state()).player.feet;
         // Landing a little off the spot is fine: the next step starts there.
-        return walked.arrived || horizontalDistance(walked, to) < 0.5
-          ? null
-          : "landed but could not reach the spot";
+        if (after.y > to.y - 0.2) {
+          return walked.arrived || horizontalDistance(walked, to) < 0.5
+            ? null
+            : "landed but could not reach the spot";
+        }
+        this.pilot.log(`climb ${attempt} landed, then slid off`);
+        continue;
       }
       this.pilot.log(
-        `climb ${attempt} fell short (feet at y ${now.y.toFixed(2)})`,
+        `climb ${attempt} fell short (feet at y ${now.y.toFixed(2)}; highest ${top.toFixed(2)}, closest ${closest.toFixed(2)} m)`,
       );
     }
     return `${CLIMB_TRIES} climbs fell short`;

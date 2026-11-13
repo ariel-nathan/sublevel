@@ -82,7 +82,9 @@ export function loftLayout(p: MaintenanceLoftParams) {
   const half = PROP_SPECS.crate_wood.halfExtents.x;
   // The staircase: a stack of two against the loft, one step in front.
   const stack = { x: q(xl - half - 0.04), z: cz };
-  const step = { x: q(stack.x - 2 * half - 0.2), z: cz };
+  // A gap of 0.3 m: a crate set down a little off does not touch (and on a
+  // knock, topple) the stack.
+  const step = { x: q(stack.x - 2 * half - 0.3), z: cz };
   const button = {
     x: x1 - BUTTON_DEPTH,
     y: p.deck + 1.2,
@@ -293,7 +295,9 @@ function build(
   const P = s.P;
   const fx = q(step.x - 1.6);
   const from = P(fx, cz);
-  const down = q(cz > 0 ? cz - 0.85 : cz + 0.85);
+  // Beside the staircase, a quarter metre clear of it (the gap in the rail
+  // leaves 1.3 m either side of the climb spot).
+  const down = q(cz > 0 ? cz - 0.95 : cz + 0.95);
   // From the entry to the staging point: the shortest way round the crates
   // and furniture (by their corners).
   const via = route({ x: 0.8, z: 0 }, { x: fx, z: cz }, blocks, {
@@ -317,8 +321,7 @@ function build(
     { do: "climb", to: F.point(xl + 0.8, H, cz) },
     { do: "walk", to: F.point(button.x - 1.0, H, button.z) },
     { do: "press", button: toggle.id },
-    // Down off the loft's edge beside the staircase (the gap in the rail
-    // leaves 0.85 m either side of it), and out.
+    // Down off the loft's edge beside the staircase, and out.
     { do: "walk", to: F.point(xl + 0.5, H, down) },
     { do: "walk", to: P(xl - 1.0, down) },
     { do: "walk", to: P(step.x - 0.9, down) },

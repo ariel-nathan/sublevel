@@ -60,6 +60,11 @@ const f = (n: number) => n.toFixed(2);
 const THROW_LIFTS = [0, 0.1, -0.1];
 /** Tries of one climb. */
 const CLIMB_TRIES = 3;
+/**
+ * A climbing player keeps this far (plus its half-width) from the edge of
+ * the surface it climbs onto until its feet are up at that height.
+ */
+const CLIMB_MARGIN = 0.12;
 /** Props tried to fetch for one throw (the step's, then others nearby). */
 const FETCH_CANDIDATES = 4;
 
@@ -316,6 +321,48 @@ export class Solver {
   }
 
   /**
+   * How far from `to`, going back towards `from`, the surface `to` lies on
+   * ends (a brush top, or a prop's top where it is now); 0 if none is found.
+   */
+  private async edgeDistance(
+    to: Point3,
+    from: { x: number; z: number },
+  ): Promise<number> {
+    const bodies = (await this.pilot.state()).bodies;
+    const tops: Box[] = [...this.solids];
+    for (const b of bodies) {
+      const spec = PROP_SPECS[b.tag as keyof typeof PROP_SPECS];
+      if (!spec) continue;
+      const r = Math.min(spec.halfExtents.x, spec.halfExtents.z);
+      tops.push({
+        x0: b.position.x - r,
+        x1: b.position.x + r,
+        y0: b.position.y - spec.halfExtents.y,
+        y1: b.position.y + spec.halfExtents.y,
+        z0: b.position.z - r,
+        z1: b.position.z + r,
+      });
+    }
+    const length = horizontalDistance(to, from);
+    if (length < 1e-6) return 0;
+    const ux = (from.x - to.x) / length;
+    const uz = (from.z - to.z) / length;
+    const on = (x: number, z: number) =>
+      tops.some(
+        (b) =>
+          Math.abs(b.y1 - to.y) < 0.08 &&
+          x >= b.x0 &&
+          x <= b.x1 &&
+          z >= b.z0 &&
+          z <= b.z1,
+      );
+    let e = 0;
+    while (e < length && on(to.x + ux * (e + 0.02), to.z + uz * (e + 0.02)))
+      e += 0.02;
+    return e;
+  }
+
+  /**
    * Climbs onto a higher surface: faces the point, one jump with a run at
    * it, keeps running until landed (stopping short of the point), then
    * walks onto the spot. A try that falls short goes back to where the
@@ -337,13 +384,23 @@ export class Solver {
       }
       const yaw = (Math.atan2(-(to.x - f.x), -(to.z - f.z)) * 180) / Math.PI;
       await this.pilot.look(yaw, -20, true);
-      await this.session.evaluate(`__harness.step(1, {"moveZ":1,"jump":true})`);
-      for (let i = 0; i < 40; i++) {
+      // Forward while far; near the surface (its edge plus the body's
+      // half-width) only once the feet are up to its height, so that the
+      // body does not run into its side (and shove a stacked crate off) on
+      // the way up.
+      const hold =
+        (await this.edgeDistance(to, f)) + PLAYER.halfWidth + CLIMB_MARGIN;
+      const forward = (d: number, y: number): number =>
+        y >= to.y - 0.05 ? (d > 0.3 ? 1 : 0) : d > hold ? 1 : 0;
+      await this.session.evaluate(
+        `__harness.step(1, {"moveZ":${forward(horizontalDistance(f, to), f.y)},"jump":true})`,
+      );
+      for (let i = 0; i < 60; i++) {
         const s = await this.pilot.state();
-        const d = Math.hypot(to.x - s.player.feet.x, to.z - s.player.feet.z);
+        const d = horizontalDistance(s.player.feet, to);
         if (i > 4 && s.player.onGround) break;
         await this.session.evaluate(
-          `__harness.step(2, {"moveZ":${d > 0.3 ? 1 : 0}})`,
+          `__harness.step(2, {"moveZ":${forward(d, s.player.feet.y)}})`,
         );
       }
       const now = (await this.pilot.state()).player.feet;
@@ -352,7 +409,10 @@ export class Solver {
           direct: true,
           tolerance: 0.15,
         });
-        return walked.arrived ? null : "landed but could not reach the spot";
+        // Landing a little off the spot is fine: the next step starts there.
+        return walked.arrived || horizontalDistance(walked, to) < 0.5
+          ? null
+          : "landed but could not reach the spot";
       }
       this.pilot.log(
         `climb ${attempt} fell short (feet at y ${now.y.toFixed(2)})`,

@@ -23,6 +23,8 @@ bun run dist
 
 The result is `dist/index.html`.
 
+A copy is live at <https://sublevel.arielnathan.com>. `bun run deploy` rebuilds and publishes it (needs the Cloudflare CLI, `cf`, logged in).
+
 ### Controls
 
 | Key        | Action                                         |

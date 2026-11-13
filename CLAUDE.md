@@ -17,6 +17,7 @@ A small first-person, physics-based game demo in the style of late-90s facility 
 - `bun run dev` — dev server on port 3210 for `index.html`.
 - `bun ./demos/<name>.html --port <port>` — serve a module demo page.
 - `bun run dist` — single-file build into `dist/`.
+- `bun run deploy` — build and publish to https://sublevel.arielnathan.com with the Cloudflare CLI (`cf`). Outward-facing: only when asked.
 
 Do not add a script named `check`, `fmt` or `test` to `package.json`: it would shadow Bun's built-in command of the same name. This Bun version has no `bun lint`.
 

@@ -11,6 +11,7 @@
     "fuzz": "bun tools/solve.ts --count 20 --from 1 --parallel 4",
     "check-seed": "bun tools/check-seed.ts",
     "map": "bun tools/map.ts",
+    "deploy": "bun tools/deploy.ts",
     "dist": "bun build --compile --target=browser ./index.html --outdir=dist"
   },
   "devDependencies": {
